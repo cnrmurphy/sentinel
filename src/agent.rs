@@ -257,6 +257,22 @@ impl AgentStore {
         Ok(())
     }
 
+    /// Mark an agent as inactive by session_id
+    pub async fn mark_inactive(&self, session_id: &str) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            r#"
+            UPDATE agents SET status = ?, last_seen_at = ? WHERE session_id = ?
+            "#,
+        )
+        .bind(AgentStatus::Inactive.to_string())
+        .bind(Utc::now().to_rfc3339())
+        .bind(session_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
     fn row_to_agent(
         row: (String, String, String, Option<String>, String, String, String),
     ) -> Option<Agent> {
