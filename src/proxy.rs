@@ -47,12 +47,25 @@ pub async fn proxy_handler(
     let request_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap_or_default();
 
     // Extract Claude session_id from request
-    // Check multiple locations: metadata.session_id (messages API) or events[].event_data.session_id (telemetry)
+    // Check multiple locations:
+    // 1. metadata.session_id (if present directly)
+    // 2. metadata.user_id contains "session_<uuid>" suffix (messages API)
+    // 3. events[].event_data.session_id (telemetry)
     let claude_session_id = request_json
         .get("metadata")
         .and_then(|m| m.get("session_id"))
         .and_then(|s| s.as_str())
         .map(String::from)
+        .or_else(|| {
+            // Try to extract from user_id field (format: user_xxx_account_xxx_session_<uuid>)
+            request_json
+                .get("metadata")
+                .and_then(|m| m.get("user_id"))
+                .and_then(|s| s.as_str())
+                .and_then(|user_id| {
+                    user_id.rsplit("_session_").next().map(String::from)
+                })
+        })
         .or_else(|| {
             // Try to extract from telemetry events
             request_json
@@ -268,7 +281,7 @@ async fn handle_regular_response(
 /// Extract working directory from request body.
 /// Claude Code includes this in the system prompt or messages.
 fn extract_working_directory(request_json: &serde_json::Value) -> Option<String> {
-    // Try to find "Working directory:" in system prompt or messages
+    // Try to find "Working directory:" in text
     let search_text = |text: &str| -> Option<String> {
         if let Some(start) = text.find("Working directory:") {
             let rest = &text[start + 18..];
@@ -281,10 +294,23 @@ fn extract_working_directory(request_json: &serde_json::Value) -> Option<String>
         None
     };
 
-    // Check system prompt
-    if let Some(system) = request_json.get("system").and_then(|s| s.as_str()) {
-        if let Some(dir) = search_text(system) {
-            return Some(dir);
+    // Check system prompt - can be string or array of content blocks
+    if let Some(system) = request_json.get("system") {
+        // String format
+        if let Some(text) = system.as_str() {
+            if let Some(dir) = search_text(text) {
+                return Some(dir);
+            }
+        }
+        // Array format: [{"type": "text", "text": "..."}]
+        if let Some(blocks) = system.as_array() {
+            for block in blocks {
+                if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                    if let Some(dir) = search_text(text) {
+                        return Some(dir);
+                    }
+                }
+            }
         }
     }
 
