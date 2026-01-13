@@ -193,6 +193,9 @@ async fn show_agents() -> Result<(), Box<dyn std::error::Error>> {
     println!("{:<15} {:<10} {:<20} {}", "NAME", "STATUS", "LAST SEEN", "WORKING DIR");
     println!("{}", "-".repeat(70));
 
+    let now = chrono::Utc::now();
+    let inactive_threshold = chrono::Duration::minutes(5);
+
     for agent in &agents {
         let working_dir = agent.working_directory.as_deref().unwrap_or("-");
         let working_dir_display = if working_dir.len() > 30 {
@@ -201,10 +204,17 @@ async fn show_agents() -> Result<(), Box<dyn std::error::Error>> {
             working_dir.to_string()
         };
 
+        // Determine status based on last seen time
+        let status = if now.signed_duration_since(agent.last_seen_at) > inactive_threshold {
+            "inactive"
+        } else {
+            "active"
+        };
+
         println!(
             "{:<15} {:<10} {:<20} {}",
             agent.name,
-            agent.status,
+            status,
             agent.last_seen_at.format("%Y-%m-%d %H:%M"),
             working_dir_display
         );
