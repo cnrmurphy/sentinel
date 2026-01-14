@@ -206,11 +206,7 @@ async fn show_agents() -> Result<(), Box<dyn std::error::Error>> {
 
     for agent in &agents {
         let working_dir = agent.working_directory.as_deref().unwrap_or("-");
-        let working_dir_display = if working_dir.len() > 30 {
-            format!("...{}", &working_dir[working_dir.len() - 27..])
-        } else {
-            working_dir.to_string()
-        };
+        let working_dir_display = truncate_path_for_display(working_dir, 30);
 
         // Determine status based on last seen time
         let status = if now.signed_duration_since(agent.last_seen_at) > inactive_threshold {
@@ -266,6 +262,17 @@ async fn resume_agent(name: &str) -> Result<(), Box<dyn std::error::Error>> {
         .status()?;
 
     std::process::exit(status.code().unwrap_or(1));
+}
+
+/// Truncate a path for display, showing "..." prefix if it exceeds max_len.
+/// For example, "/home/user/long/path/here" with max_len=20 becomes "...ng/path/here"
+fn truncate_path_for_display(path: &str, max_len: usize) -> String {
+    if path.len() > max_len {
+        let suffix_len = max_len.saturating_sub(3); // Reserve 3 chars for "..."
+        format!("...{}", &path[path.len() - suffix_len..])
+    } else {
+        path.to_string()
+    }
 }
 
 fn print_request_summary(data: &serde_json::Value) {
