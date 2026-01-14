@@ -46,28 +46,7 @@ pub async fn proxy_handler(
     // Parse request body as JSON for logging
     let request_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap_or_default();
 
-    // Extract Claude session_id from request
-    // Check multiple locations: metadata.session_id (messages API) or events[].event_data.session_id (telemetry)
-    let claude_session_id = request_json
-        .get("metadata")
-        .and_then(|m| m.get("session_id"))
-        .and_then(|s| s.as_str())
-        .map(String::from)
-        .or_else(|| {
-            // Try to extract from telemetry events
-            request_json
-                .get("events")
-                .and_then(|e| e.as_array())
-                .and_then(|events| {
-                    events.iter().find_map(|event| {
-                        event
-                            .get("event_data")
-                            .and_then(|d| d.get("session_id"))
-                            .and_then(|s| s.as_str())
-                            .map(String::from)
-                    })
-                })
-        });
+    let claude_session_id = extract_claude_session_id(&request_json);
 
     // Extract working directory from system prompt if available
     let working_dir = extract_working_directory(&request_json);
@@ -268,7 +247,7 @@ async fn handle_regular_response(
 /// Extract working directory from request body.
 /// Claude Code includes this in the system prompt or messages.
 fn extract_working_directory(request_json: &serde_json::Value) -> Option<String> {
-    // Try to find "Working directory:" in system prompt or messages
+    // Try to find "Working directory:" in text
     let search_text = |text: &str| -> Option<String> {
         if let Some(start) = text.find("Working directory:") {
             let rest = &text[start + 18..];
@@ -281,10 +260,23 @@ fn extract_working_directory(request_json: &serde_json::Value) -> Option<String>
         None
     };
 
-    // Check system prompt
-    if let Some(system) = request_json.get("system").and_then(|s| s.as_str()) {
-        if let Some(dir) = search_text(system) {
-            return Some(dir);
+    // Check system prompt - can be string or array of content blocks
+    if let Some(system) = request_json.get("system") {
+        // String format
+        if let Some(text) = system.as_str() {
+            if let Some(dir) = search_text(text) {
+                return Some(dir);
+            }
+        }
+        // Array format: [{"type": "text", "text": "..."}]
+        if let Some(blocks) = system.as_array() {
+            for block in blocks {
+                if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                    if let Some(dir) = search_text(text) {
+                        return Some(dir);
+                    }
+                }
+            }
         }
     }
 
@@ -300,4 +292,38 @@ fn extract_working_directory(request_json: &serde_json::Value) -> Option<String>
     }
 
     None
+}
+
+/// Extract Claude session_id from request.
+/// Checks two locations because different request types store it differently:
+/// - Messages API (/v1/messages): embedded in metadata.user_id, also has working directory
+/// - Telemetry (/api/event_logging/batch): directly in events[].event_data.session_id
+fn extract_claude_session_id(request_json: &serde_json::Value) -> Option<String> {
+    extract_session_id_from_metadata_user_id(request_json)
+        .or_else(|| extract_session_id_from_events(request_json))
+}
+
+/// Extract session_id from Messages API requests.
+/// The user_id field has format: user_xxx_account_xxx_session_<uuid>
+fn extract_session_id_from_metadata_user_id(request_json: &serde_json::Value) -> Option<String> {
+    request_json
+        .get("metadata")?
+        .get("user_id")?
+        .as_str()?
+        .rsplit_once("_session_")
+        .map(|(_, session)| session.to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Extract session_id from Telemetry requests.
+/// Telemetry batches contain events with session_id in event_data.
+fn extract_session_id_from_events(request_json: &serde_json::Value) -> Option<String> {
+    let events = request_json.get("events")?.as_array()?;
+    events.iter().find_map(|event| {
+        event
+            .get("event_data")?
+            .get("session_id")?
+            .as_str()
+            .map(|s| s.to_string())
+    })
 }

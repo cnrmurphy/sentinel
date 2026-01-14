@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tracing::info;
 use uuid::Uuid;
 
-use crate::agent::AgentStore;
+use crate::agent::{AgentStatus, AgentStore};
 use crate::proxy::{proxy_handler, ProxyState};
 use crate::storage::{EventType, Storage};
 
@@ -103,9 +103,7 @@ async fn run_proxy(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // Build router - fallback catches all routes
-    let app = Router::new()
-        .fallback(proxy_handler)
-        .with_state(state);
+    let app = Router::new().fallback(proxy_handler).with_state(state);
 
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     info!("Sentinel proxy listening on http://{}", addr);
@@ -120,7 +118,11 @@ async fn run_proxy(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn show_logs(limit: i64, event_type: Option<String>, raw: bool) -> Result<(), Box<dyn std::error::Error>> {
+async fn show_logs(
+    limit: i64,
+    event_type: Option<String>,
+    raw: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let data_dir = get_data_dir();
     let db_path = data_dir.join("sentinel.db");
 
@@ -157,7 +159,10 @@ async fn show_logs(limit: i64, event_type: Option<String>, raw: bool) -> Result<
 
         if raw {
             // Show raw JSON data
-            println!("{}", serde_json::to_string_pretty(&event.data).unwrap_or_default());
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&event.data).unwrap_or_default()
+            );
         } else {
             // Pretty print a summary of the data
             match event.event_type {
@@ -190,21 +195,30 @@ async fn show_agents() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    println!("{:<15} {:<10} {:<20} {}", "NAME", "STATUS", "LAST SEEN", "WORKING DIR");
+    println!(
+        "{:<15} {:<10} {:<20} {}",
+        "NAME", "STATUS", "LAST SEEN", "WORKING DIR"
+    );
     println!("{}", "-".repeat(70));
+
+    let now = chrono::Utc::now();
+    let inactive_threshold = chrono::Duration::minutes(5);
 
     for agent in &agents {
         let working_dir = agent.working_directory.as_deref().unwrap_or("-");
-        let working_dir_display = if working_dir.len() > 30 {
-            format!("...{}", &working_dir[working_dir.len() - 27..])
+        let working_dir_display = truncate_path_for_display(working_dir, 30);
+
+        // Determine status based on last seen time
+        let status = if now.signed_duration_since(agent.last_seen_at) > inactive_threshold {
+            AgentStatus::Inactive
         } else {
-            working_dir.to_string()
+            AgentStatus::Active
         };
 
         println!(
             "{:<15} {:<10} {:<20} {}",
             agent.name,
-            agent.status,
+            status,
             agent.last_seen_at.format("%Y-%m-%d %H:%M"),
             working_dir_display
         );
@@ -236,7 +250,10 @@ async fn resume_agent(name: &str) -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    println!("Resuming agent '{}' (session: {})", agent.name, agent.session_id);
+    println!(
+        "Resuming agent '{}' (session: {})",
+        agent.name, agent.session_id
+    );
 
     // Execute claude with --resume flag
     let status = std::process::Command::new("claude")
@@ -245,6 +262,17 @@ async fn resume_agent(name: &str) -> Result<(), Box<dyn std::error::Error>> {
         .status()?;
 
     std::process::exit(status.code().unwrap_or(1));
+}
+
+/// Truncate a path for display, showing "..." prefix if it exceeds max_len.
+/// For example, "/home/user/long/path/here" with max_len=20 becomes "...ng/path/here"
+fn truncate_path_for_display(path: &str, max_len: usize) -> String {
+    if path.len() > max_len {
+        let suffix_len = max_len.saturating_sub(3); // Reserve 3 chars for "..."
+        format!("...{}", &path[path.len() - suffix_len..])
+    } else {
+        path.to_string()
+    }
 }
 
 fn print_request_summary(data: &serde_json::Value) {
@@ -265,7 +293,11 @@ fn print_request_summary(data: &serde_json::Value) {
 }
 
 fn print_response_summary(data: &serde_json::Value) {
-    if data.get("streaming").and_then(|s| s.as_bool()).unwrap_or(false) {
+    if data
+        .get("streaming")
+        .and_then(|s| s.as_bool())
+        .unwrap_or(false)
+    {
         println!("  [Streaming response]");
         if let Some(body) = data.get("body").and_then(|b| b.as_str()) {
             // For streaming, body is raw SSE text - show byte count
@@ -305,7 +337,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Start { port } => {
             run_proxy(port).await?;
         }
-        Commands::Logs { limit, event_type, raw } => {
+        Commands::Logs {
+            limit,
+            event_type,
+            raw,
+        } => {
             show_logs(limit, event_type, raw).await?;
         }
         Commands::Agents => {
