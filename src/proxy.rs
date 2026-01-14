@@ -46,28 +46,18 @@ pub async fn proxy_handler(
     // Parse request body as JSON for logging
     let request_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap_or_default();
 
-    // Extract Claude session_id from request
-    // Check multiple locations:
-    // 1. metadata.session_id (if present directly)
-    // 2. metadata.user_id contains "session_<uuid>" suffix (messages API)
-    // 3. events[].event_data.session_id (telemetry)
+    // Extract Claude session_id from request.
+    // We check two locations because different request types store it differently:
+    // - Messages API (/v1/messages): embedded in metadata.user_id as "user_xxx_session_<uuid>"
+    //   This request type also contains the working directory in the system prompt.
+    // - Telemetry (/api/event_logging/batch): directly in events[].event_data.session_id
+    //   This request type arrives frequently but has no working directory.
     let claude_session_id = request_json
         .get("metadata")
-        .and_then(|m| m.get("session_id"))
+        .and_then(|m| m.get("user_id"))
         .and_then(|s| s.as_str())
-        .map(String::from)
+        .and_then(|user_id| user_id.rsplit("_session_").next().map(String::from))
         .or_else(|| {
-            // Try to extract from user_id field (format: user_xxx_account_xxx_session_<uuid>)
-            request_json
-                .get("metadata")
-                .and_then(|m| m.get("user_id"))
-                .and_then(|s| s.as_str())
-                .and_then(|user_id| {
-                    user_id.rsplit("_session_").next().map(String::from)
-                })
-        })
-        .or_else(|| {
-            // Try to extract from telemetry events
             request_json
                 .get("events")
                 .and_then(|e| e.as_array())
