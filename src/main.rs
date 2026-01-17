@@ -1,17 +1,21 @@
 mod agent;
 mod parsers;
 mod proxy;
+mod sse;
 mod storage;
 
+use axum::routing::get;
 use axum::Router;
 use clap::{Parser, Subcommand};
 use reqwest::Client;
 use std::sync::Arc;
+use tokio::sync::broadcast;
 use tracing::info;
 use uuid::Uuid;
 
 use crate::agent::{AgentStatus, AgentStore};
-use crate::proxy::{proxy_handler, ProxyState};
+use crate::proxy::{proxy_handler, ProxyEvent, ProxyState};
+use crate::sse::sse_handler;
 use crate::storage::{EventType, Storage};
 
 #[derive(Parser)]
@@ -94,16 +98,22 @@ async fn run_proxy(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     let session_id = Uuid::new_v4();
     info!("Session ID: {}", session_id);
 
+    let (event_broadcaster, _) = broadcast::channel::<ProxyEvent>(100);
+
     let state = Arc::new(ProxyState {
         storage,
         agent_store,
         http_client,
         session_id,
         parser,
+        event_broadcaster,
     });
 
-    // Build router - fallback catches all routes
-    let app = Router::new().fallback(proxy_handler).with_state(state);
+    // Build router - /api/events must be before fallback
+    let app = Router::new()
+        .route("/api/events", get(sse_handler))
+        .fallback(proxy_handler)
+        .with_state(state);
 
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     info!("Sentinel proxy listening on http://{}", addr);
