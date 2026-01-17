@@ -17,6 +17,14 @@ use crate::storage::{Event, Storage};
 
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com";
 
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ProxyEvent {
+    pub id: Uuid,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub event_type: String,
+    pub data: serde_json::Value,
+}
+
 #[derive(Clone)]
 pub struct ProxyState {
     pub storage: Storage,
@@ -24,6 +32,7 @@ pub struct ProxyState {
     pub http_client: Client,
     pub session_id: Uuid,
     pub parser: Arc<dyn ResponseParser>,
+    pub event_broadcaster: tokio::sync::broadcast::Sender<ProxyEvent>,
 }
 
 pub async fn proxy_handler(
@@ -53,7 +62,11 @@ pub async fn proxy_handler(
 
     // Track agent if we have a Claude session_id
     let agent_name = if let Some(ref session_id) = claude_session_id {
-        match state.agent_store.get_or_create_agent(session_id, working_dir.as_deref()).await {
+        match state
+            .agent_store
+            .get_or_create_agent(session_id, working_dir.as_deref())
+            .await
+        {
             Ok(agent) => Some(agent.name),
             Err(e) => {
                 warn!("Failed to track agent: {}", e);
@@ -63,6 +76,9 @@ pub async fn proxy_handler(
     } else {
         None
     };
+
+    // Skip telemetry events - they're just metadata noise
+    let is_telemetry = uri.path().contains("event_logging");
 
     // Log the request (non-blocking, errors logged internally)
     let request_event = Event::request(
@@ -75,10 +91,28 @@ pub async fn proxy_handler(
             "claude_session_id": claude_session_id,
         }),
     );
-    state.storage.insert_event(&request_event).await;
+
+    if !is_telemetry {
+        state.storage.insert_event(&request_event).await;
+
+        let _ = state.event_broadcaster.send(ProxyEvent {
+            id: request_event.id,
+            timestamp: request_event.timestamp,
+            event_type: "request".to_string(),
+            data: request_event.data.clone(),
+        });
+    }
 
     let agent_info = agent_name.map(|n| format!(" [{}]", n)).unwrap_or_default();
-    info!("→ {} {}{} ({} bytes)", method, uri.path(), agent_info, body_bytes.len());
+    if !is_telemetry {
+        info!(
+            "→ {} {}{} ({} bytes)",
+            method,
+            uri.path(),
+            agent_info,
+            body_bytes.len()
+        );
+    }
 
     // Build the forwarding URL
     let forward_url = format!(
@@ -118,9 +152,9 @@ pub async fn proxy_handler(
     let is_streaming = content_type.contains("text/event-stream");
 
     if is_streaming {
-        handle_streaming_response(state, response, status, response_headers).await
+        handle_streaming_response(state, response, status, response_headers, is_telemetry).await
     } else {
-        handle_regular_response(state, response, status, response_headers).await
+        handle_regular_response(state, response, status, response_headers, is_telemetry).await
     }
 }
 
@@ -129,6 +163,7 @@ async fn handle_streaming_response(
     response: reqwest::Response,
     status: reqwest::StatusCode,
     response_headers: reqwest::header::HeaderMap,
+    is_telemetry: bool,
 ) -> Result<Response<Body>, StatusCode> {
     let mut stream = response.bytes_stream();
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(32);
@@ -136,6 +171,7 @@ async fn handle_streaming_response(
     let storage = state.storage.clone();
     let session_id = state.session_id;
     let parser = state.parser.clone();
+    let event_broadcaster = state.event_broadcaster.clone();
 
     // Spawn task to collect and forward chunks
     tokio::spawn(async move {
@@ -156,8 +192,16 @@ async fn handle_streaming_response(
             }
         }
 
+        // Skip logging for telemetry responses
+        if is_telemetry {
+            return;
+        }
+
         // Log complete response after stream ends
-        let full_response: Vec<u8> = response_chunks.iter().flat_map(|c| c.iter().copied()).collect();
+        let full_response: Vec<u8> = response_chunks
+            .iter()
+            .flat_map(|c| c.iter().copied())
+            .collect();
         let response_text = String::from_utf8_lossy(&full_response);
 
         // Parse the streaming response into structured data
@@ -172,12 +216,27 @@ async fn handle_streaming_response(
         );
         storage.insert_event(&response_event).await;
 
+        let _ = event_broadcaster.send(ProxyEvent {
+            id: response_event.id,
+            timestamp: response_event.timestamp,
+            event_type: "response".to_string(),
+            data: response_event.data.clone(),
+        });
+
         // Log a summary
         let text_preview = parsed.text.as_ref().map(|t| {
             let preview: String = t.chars().take(50).collect();
-            if t.len() > 50 { format!("{}...", preview) } else { preview }
+            if t.len() > 50 {
+                format!("{}...", preview)
+            } else {
+                preview
+            }
         });
-        info!("← Streaming response complete ({} bytes) text={:?}", full_response.len(), text_preview);
+        info!(
+            "← Streaming response complete ({} bytes) text={:?}",
+            full_response.len(),
+            text_preview
+        );
     });
 
     // Build streaming response
@@ -200,6 +259,7 @@ async fn handle_regular_response(
     response: reqwest::Response,
     status: reqwest::StatusCode,
     response_headers: reqwest::header::HeaderMap,
+    is_telemetry: bool,
 ) -> Result<Response<Body>, StatusCode> {
     let response_bytes = match response.bytes().await {
         Ok(bytes) => bytes,
@@ -212,25 +272,33 @@ async fn handle_regular_response(
     let response_json: serde_json::Value =
         serde_json::from_slice(&response_bytes).unwrap_or_default();
 
-    // Parse the response if it looks like an LLM response
-    let parsed = if response_json.get("content").is_some() || response_json.get("type").is_some() {
-        Some(state.parser.parse_json(&response_json))
-    } else {
-        None
-    };
+    if !is_telemetry {
+        // Parse the response if it looks like an LLM response
+        let parsed = if response_json.get("content").is_some() || response_json.get("type").is_some() {
+            Some(state.parser.parse_json(&response_json))
+        } else {
+            None
+        };
 
-    // Log the response
-    let response_event = Event::response(
-        state.session_id,
-        serde_json::json!({
-            "status": status.as_u16(),
-            "body": response_json,
-            "parsed": parsed,
-        }),
-    );
-    state.storage.insert_event(&response_event).await;
+        // Log the response
+        let response_event = Event::response(
+            state.session_id,
+            serde_json::json!({
+                "status": status.as_u16(),
+                "body": response_json,
+                "parsed": parsed,
+            }),
+        );
+        state.storage.insert_event(&response_event).await;
+        let _ = state.event_broadcaster.send(ProxyEvent {
+            id: response_event.id,
+            timestamp: response_event.timestamp,
+            event_type: "response".to_string(),
+            data: response_event.data.clone(),
+        });
 
-    info!("← {} ({} bytes)", status, response_bytes.len());
+        info!("← {} ({} bytes)", status, response_bytes.len());
+    }
 
     // Build response
     let mut builder = Response::builder().status(status.as_u16());
