@@ -18,7 +18,7 @@ use crate::storage::{Event, Storage};
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com";
 
 #[derive(Clone, Debug, serde::Serialize)]
-pub struct ProxyEvent {
+pub struct ObservabilityEvent {
     pub id: Uuid,
     pub timestamp: chrono::DateTime<chrono::Utc>,
     pub event_type: String,
@@ -32,7 +32,7 @@ pub struct ProxyState {
     pub http_client: Client,
     pub session_id: Uuid,
     pub parser: Arc<dyn ResponseParser>,
-    pub event_broadcaster: tokio::sync::broadcast::Sender<ProxyEvent>,
+    pub event_broadcaster: tokio::sync::broadcast::Sender<ObservabilityEvent>,
 }
 
 pub async fn proxy_handler(
@@ -95,7 +95,7 @@ pub async fn proxy_handler(
     if !is_telemetry {
         state.storage.insert_event(&request_event).await;
 
-        let _ = state.event_broadcaster.send(ProxyEvent {
+        let _ = state.event_broadcaster.send(ObservabilityEvent {
             id: request_event.id,
             timestamp: request_event.timestamp,
             event_type: "request".to_string(),
@@ -216,7 +216,7 @@ async fn handle_streaming_response(
         );
         storage.insert_event(&response_event).await;
 
-        let _ = event_broadcaster.send(ProxyEvent {
+        let _ = event_broadcaster.send(ObservabilityEvent {
             id: response_event.id,
             timestamp: response_event.timestamp,
             event_type: "response".to_string(),
@@ -274,11 +274,12 @@ async fn handle_regular_response(
 
     if !is_telemetry {
         // Parse the response if it looks like an LLM response
-        let parsed = if response_json.get("content").is_some() || response_json.get("type").is_some() {
-            Some(state.parser.parse_json(&response_json))
-        } else {
-            None
-        };
+        let parsed =
+            if response_json.get("content").is_some() || response_json.get("type").is_some() {
+                Some(state.parser.parse_json(&response_json))
+            } else {
+                None
+            };
 
         // Log the response
         let response_event = Event::response(
@@ -290,7 +291,7 @@ async fn handle_regular_response(
             }),
         );
         state.storage.insert_event(&response_event).await;
-        let _ = state.event_broadcaster.send(ProxyEvent {
+        let _ = state.event_broadcaster.send(ObservabilityEvent {
             id: response_event.id,
             timestamp: response_event.timestamp,
             event_type: "response".to_string(),

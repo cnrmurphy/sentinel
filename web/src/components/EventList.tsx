@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useSSE } from '../hooks/useSSE';
-import type { ProxyEvent } from '../hooks/useSSE';
+import type { ObservabilityEvent } from '../hooks/useSSE';
 
 interface Message {
   role: string;
@@ -35,7 +35,7 @@ function truncate(text: string, maxLen: number): string {
   return text.slice(0, maxLen) + '...';
 }
 
-function EventItem({ event }: { event: ProxyEvent }) {
+function EventItem({ event }: { event: ObservabilityEvent }) {
   const [expanded, setExpanded] = useState(false);
   const isRequest = event.event_type === 'request';
   const arrow = isRequest ? '→' : '←';

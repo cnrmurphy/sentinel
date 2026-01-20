@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
 
-export interface ProxyEvent {
+export interface ObservabilityEvent {
   id: string;
   timestamp: string;
   event_type: 'request' | 'response';
@@ -8,7 +8,7 @@ export interface ProxyEvent {
 }
 
 export function useSSE(url: string) {
-  const [events, setEvents] = useState<ProxyEvent[]>([]);
+  const [events, setEvents] = useState<ObservabilityEvent[]>([]);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -32,7 +32,7 @@ export function useSSE(url: string) {
     // Listen for both event types
     const handleEvent = (e: MessageEvent) => {
       try {
-        const event: ProxyEvent = JSON.parse(e.data);
+        const event: ObservabilityEvent = JSON.parse(e.data);
         setEvents((prev) => [...prev, event]);
       } catch (err) {
         console.error('Failed to parse event:', err);

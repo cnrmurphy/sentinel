@@ -14,7 +14,7 @@ use tracing::info;
 use uuid::Uuid;
 
 use crate::agent::{AgentStatus, AgentStore};
-use crate::proxy::{proxy_handler, ProxyEvent, ProxyState};
+use crate::proxy::{proxy_handler, ObservabilityEvent, ProxyState};
 use crate::sse::sse_handler;
 use crate::storage::{EventType, Storage};
 
@@ -98,7 +98,7 @@ async fn run_proxy(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     let session_id = Uuid::new_v4();
     info!("Session ID: {}", session_id);
 
-    let (event_broadcaster, _) = broadcast::channel::<ProxyEvent>(100);
+    let (event_broadcaster, _) = broadcast::channel::<ObservabilityEvent>(100);
 
     let state = Arc::new(ProxyState {
         storage,
