@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Event {
+    pub seq: Option<i64>,
     pub id: Uuid,
     pub session_id: Uuid,
     pub timestamp: DateTime<Utc>,
@@ -31,6 +32,7 @@ impl std::fmt::Display for EventType {
 impl Event {
     pub fn request(session_id: Uuid, data: serde_json::Value) -> Self {
         Self {
+            seq: None,
             id: Uuid::new_v4(),
             session_id,
             timestamp: Utc::now(),
@@ -41,6 +43,7 @@ impl Event {
 
     pub fn response(session_id: Uuid, data: serde_json::Value) -> Self {
         Self {
+            seq: None,
             id: Uuid::new_v4(),
             session_id,
             timestamp: Utc::now(),
@@ -79,7 +82,8 @@ impl Storage {
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS events (
-                id TEXT PRIMARY KEY,
+                seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                id TEXT UNIQUE NOT NULL,
                 session_id TEXT NOT NULL,
                 timestamp TEXT NOT NULL,
                 event_type TEXT NOT NULL,
@@ -98,26 +102,21 @@ impl Storage {
         .execute(&self.pool)
         .await?;
 
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp)
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
         Ok(())
     }
 
-    /// Insert an event, logging any errors but not failing
-    pub async fn insert_event(&self, event: &Event) {
-        if let Err(e) = self.insert_event_inner(event).await {
-            tracing::error!("Failed to store event: {}", e);
+    pub async fn insert_event(&self, event: &Event) -> Option<i64> {
+        match self.insert_event_inner(event).await {
+            Ok(seq) => Some(seq),
+            Err(e) => {
+                tracing::error!("Failed to store event: {}", e);
+                None
+            }
         }
     }
 
-    async fn insert_event_inner(&self, event: &Event) -> Result<(), sqlx::Error> {
-        sqlx::query(
+    async fn insert_event_inner(&self, event: &Event) -> Result<i64, sqlx::Error> {
+        let result = sqlx::query(
             r#"
             INSERT INTO events (id, session_id, timestamp, event_type, data)
             VALUES (?, ?, ?, ?, ?)
@@ -131,7 +130,7 @@ impl Storage {
         .execute(&self.pool)
         .await?;
 
-        Ok(())
+        Ok(result.last_insert_rowid())
     }
 
     pub async fn get_recent_events(
@@ -139,13 +138,14 @@ impl Storage {
         limit: i64,
         event_type: Option<&str>,
     ) -> Result<Vec<Event>, sqlx::Error> {
-        let rows: Vec<(String, String, String, String, String)> = if let Some(et) = event_type {
+        let rows: Vec<(i64, String, String, String, String, String)> = if let Some(et) = event_type
+        {
             sqlx::query_as(
                 r#"
-                SELECT id, session_id, timestamp, event_type, data
+                SELECT seq, id, session_id, timestamp, event_type, data
                 FROM events
                 WHERE event_type = ?
-                ORDER BY timestamp DESC
+                ORDER BY seq DESC
                 LIMIT ?
                 "#,
             )
@@ -156,9 +156,9 @@ impl Storage {
         } else {
             sqlx::query_as(
                 r#"
-                SELECT id, session_id, timestamp, event_type, data
+                SELECT seq, id, session_id, timestamp, event_type, data
                 FROM events
-                ORDER BY timestamp DESC
+                ORDER BY seq DESC
                 LIMIT ?
                 "#,
             )
@@ -169,8 +169,9 @@ impl Storage {
 
         let events = rows
             .into_iter()
-            .filter_map(|(id, session_id, timestamp, event_type, data)| {
+            .filter_map(|(seq, id, session_id, timestamp, event_type, data)| {
                 Some(Event {
+                    seq: Some(seq),
                     id: id.parse().ok()?,
                     session_id: session_id.parse().ok()?,
                     timestamp: DateTime::parse_from_rfc3339(&timestamp)
