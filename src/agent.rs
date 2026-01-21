@@ -18,6 +18,13 @@ pub struct Agent {
     pub created_at: DateTime<Utc>,
     pub last_seen_at: DateTime<Utc>,
     pub status: AgentStatus,
+    pub topic: Option<String>,
+}
+
+impl Agent {
+    pub fn set_topic(&mut self, topic: String) {
+        self.topic = Some(topic);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -38,17 +45,13 @@ impl std::fmt::Display for AgentStatus {
 
 /// Word lists for generating human-readable names
 const ADJECTIVES: &[&str] = &[
-    "swift", "bright", "calm", "bold", "keen",
-    "warm", "cool", "wild", "sage", "fair",
-    "blue", "red", "green", "gold", "silver",
-    "quiet", "quick", "brave", "wise", "kind",
+    "swift", "bright", "calm", "bold", "keen", "warm", "cool", "wild", "sage", "fair", "blue",
+    "red", "green", "gold", "silver", "quiet", "quick", "brave", "wise", "kind",
 ];
 
 const NOUNS: &[&str] = &[
-    "fox", "owl", "wolf", "bear", "hawk",
-    "deer", "lynx", "crow", "dove", "swan",
-    "oak", "pine", "fern", "moss", "sage",
-    "star", "moon", "wind", "rain", "snow",
+    "fox", "owl", "wolf", "bear", "hawk", "deer", "lynx", "crow", "dove", "swan", "oak", "pine",
+    "fern", "moss", "sage", "star", "moon", "wind", "rain", "snow",
 ];
 
 /// Generate a human-readable name like "swift-fox" or "blue-owl"
@@ -123,11 +126,13 @@ impl AgentStore {
         // First, try to find existing agent by session_id
         if let Some(mut agent) = self.find_by_session_id(session_id).await? {
             // Update last_seen and status
-            self.update_last_seen(&agent.id, AgentStatus::Active).await?;
+            self.update_last_seen(&agent.id, AgentStatus::Active)
+                .await?;
 
             // Update working directory if we have new info and agent doesn't have it yet
             if working_directory.is_some() && agent.working_directory.is_none() {
-                self.update_working_directory(&agent.id, working_directory).await?;
+                self.update_working_directory(&agent.id, working_directory)
+                    .await?;
                 agent.working_directory = working_directory.map(String::from);
             }
             return Ok(agent);
@@ -152,11 +157,16 @@ impl AgentStore {
             created_at: now,
             last_seen_at: now,
             status: AgentStatus::Active,
+            topic: Some(String::from("")),
         };
 
         self.insert(&agent).await?;
 
-        tracing::info!("New agent '{}' created for session {}", agent.name, session_id);
+        tracing::info!(
+            "New agent '{}' created for session {}",
+            agent.name,
+            session_id
+        );
 
         Ok(agent)
     }
@@ -182,48 +192,69 @@ impl AgentStore {
     }
 
     pub async fn find_by_session_id(&self, session_id: &str) -> Result<Option<Agent>, sqlx::Error> {
-        let row: Option<(String, String, String, Option<String>, String, String, String)> =
-            sqlx::query_as(
-                r#"
+        let row: Option<(
+            String,
+            String,
+            String,
+            Option<String>,
+            String,
+            String,
+            String,
+        )> = sqlx::query_as(
+            r#"
                 SELECT id, name, session_id, working_directory, created_at, last_seen_at, status
                 FROM agents
                 WHERE session_id = ?
                 "#,
-            )
-            .bind(session_id)
-            .fetch_optional(&self.pool)
-            .await?;
+        )
+        .bind(session_id)
+        .fetch_optional(&self.pool)
+        .await?;
 
         Ok(row.and_then(Self::row_to_agent))
     }
 
     pub async fn find_by_name(&self, name: &str) -> Result<Option<Agent>, sqlx::Error> {
-        let row: Option<(String, String, String, Option<String>, String, String, String)> =
-            sqlx::query_as(
-                r#"
+        let row: Option<(
+            String,
+            String,
+            String,
+            Option<String>,
+            String,
+            String,
+            String,
+        )> = sqlx::query_as(
+            r#"
                 SELECT id, name, session_id, working_directory, created_at, last_seen_at, status
                 FROM agents
                 WHERE name = ?
                 "#,
-            )
-            .bind(name)
-            .fetch_optional(&self.pool)
-            .await?;
+        )
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?;
 
         Ok(row.and_then(Self::row_to_agent))
     }
 
     pub async fn list_all(&self) -> Result<Vec<Agent>, sqlx::Error> {
-        let rows: Vec<(String, String, String, Option<String>, String, String, String)> =
-            sqlx::query_as(
-                r#"
+        let rows: Vec<(
+            String,
+            String,
+            String,
+            Option<String>,
+            String,
+            String,
+            String,
+        )> = sqlx::query_as(
+            r#"
                 SELECT id, name, session_id, working_directory, created_at, last_seen_at, status
                 FROM agents
                 ORDER BY last_seen_at DESC
                 "#,
-            )
-            .fetch_all(&self.pool)
-            .await?;
+        )
+        .fetch_all(&self.pool)
+        .await?;
 
         Ok(rows.into_iter().filter_map(Self::row_to_agent).collect())
     }
@@ -243,7 +274,11 @@ impl AgentStore {
         Ok(())
     }
 
-    async fn update_working_directory(&self, id: &Uuid, working_directory: Option<&str>) -> Result<(), sqlx::Error> {
+    async fn update_working_directory(
+        &self,
+        id: &Uuid,
+        working_directory: Option<&str>,
+    ) -> Result<(), sqlx::Error> {
         sqlx::query(
             r#"
             UPDATE agents SET working_directory = ? WHERE id = ?
@@ -274,7 +309,15 @@ impl AgentStore {
     }
 
     fn row_to_agent(
-        row: (String, String, String, Option<String>, String, String, String),
+        row: (
+            String,
+            String,
+            String,
+            Option<String>,
+            String,
+            String,
+            String,
+        ),
     ) -> Option<Agent> {
         let (id, name, session_id, working_directory, created_at, last_seen_at, status) = row;
         Some(Agent {
@@ -293,6 +336,7 @@ impl AgentStore {
                 "inactive" => AgentStatus::Inactive,
                 _ => return None,
             },
+            topic: Some(String::from("")),
         })
     }
 }
