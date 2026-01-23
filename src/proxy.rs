@@ -93,7 +93,9 @@ pub async fn proxy_handler(
     );
 
     if !is_telemetry {
-        state.storage.insert_event(&request_event).await;
+        if let Err(e) = state.storage.insert_event(&request_event).await {
+            tracing::error!("Failed to store request event: {}", e);
+        }
 
         let _ = state.event_broadcaster.send(ObservabilityEvent {
             id: request_event.id,
@@ -214,7 +216,9 @@ async fn handle_streaming_response(
                 "parsed": parsed,
             }),
         );
-        storage.insert_event(&response_event).await;
+        if let Err(e) = storage.insert_event(&response_event).await {
+            tracing::error!("Failed to store response event: {}", e);
+        }
 
         let _ = event_broadcaster.send(ObservabilityEvent {
             id: response_event.id,
@@ -290,7 +294,9 @@ async fn handle_regular_response(
                 "parsed": parsed,
             }),
         );
-        state.storage.insert_event(&response_event).await;
+        if let Err(e) = state.storage.insert_event(&response_event).await {
+            tracing::error!("Failed to store response event: {}", e);
+        }
         let _ = state.event_broadcaster.send(ObservabilityEvent {
             id: response_event.id,
             timestamp: response_event.timestamp,

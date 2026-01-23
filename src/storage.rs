@@ -105,17 +105,7 @@ impl Storage {
         Ok(())
     }
 
-    pub async fn insert_event(&self, event: &Event) -> Option<i64> {
-        match self.insert_event_inner(event).await {
-            Ok(seq) => Some(seq),
-            Err(e) => {
-                tracing::error!("Failed to store event: {}", e);
-                None
-            }
-        }
-    }
-
-    async fn insert_event_inner(&self, event: &Event) -> Result<i64, sqlx::Error> {
+    pub async fn insert_event(&self, event: &Event) -> Result<i64, sqlx::Error> {
         let result = sqlx::query(
             r#"
             INSERT INTO events (id, session_id, timestamp, event_type, data)
