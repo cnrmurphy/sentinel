@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use crate::agent::AgentStore;
 use crate::event::{ObservabilityEvent, Payload, UserMessage};
-use crate::parsers::{extract_model, extract_user_message_text, ResponseParser};
+use crate::parsers::{AnthropicRequest, ResponseParser};
 use crate::storage::{Event, Storage};
 
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com";
@@ -45,13 +45,12 @@ pub async fn proxy_handler(
         }
     };
 
-    // Parse request body as JSON for logging
+    // Parse request body as JSON for storage and typed access
     let request_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap_or_default();
+    let request: Option<AnthropicRequest> = serde_json::from_slice(&body_bytes).ok();
 
-    let claude_session_id = extract_claude_session_id(&request_json);
-
-    // Extract working directory from system prompt if available
-    let working_dir = extract_working_directory(&request_json);
+    let claude_session_id = extract_claude_session_id(&request);
+    let working_dir = extract_working_directory(&request);
 
     // Track agent if we have a Claude session_id
     let agent_name = if let Some(ref session_id) = claude_session_id {
@@ -90,18 +89,20 @@ pub async fn proxy_handler(
             tracing::error!("Failed to store request event: {}", e);
         }
 
-        if let Some(text) = extract_user_message_text(&request_json) {
-            let _ = state.event_broadcaster.send(ObservabilityEvent {
-                seq: None,
-                id: request_event.id,
-                timestamp: request_event.timestamp,
-                session_id: claude_session_id.clone(),
-                agent: agent_name.clone(),
-                payload: Payload::UserMessage(UserMessage {
-                    model: extract_model(&request_json),
-                    text,
-                }),
-            });
+        if let Some(ref req) = request {
+            if let Some(text) = req.last_user_message_text() {
+                let _ = state.event_broadcaster.send(ObservabilityEvent {
+                    seq: None,
+                    id: request_event.id,
+                    timestamp: request_event.timestamp,
+                    session_id: claude_session_id.clone(),
+                    agent: agent_name.clone(),
+                    payload: Payload::UserMessage(UserMessage {
+                        model: Some(req.model.clone()),
+                        text,
+                    }),
+                });
+            }
         }
     }
 
@@ -331,48 +332,52 @@ async fn handle_regular_response(
     })
 }
 
-/// Extract working directory from request body.
-/// Claude Code includes this in the system prompt or messages.
-fn extract_working_directory(request_json: &serde_json::Value) -> Option<String> {
-    // Try to find "Working directory:" in text
+fn extract_working_directory(request: &Option<AnthropicRequest>) -> Option<String> {
+    use crate::parsers::{ContentBlock, MessageContent, SystemContent};
+
+    let request = request.as_ref()?;
+
     let search_text = |text: &str| -> Option<String> {
-        if let Some(start) = text.find("Working directory:") {
-            let rest = &text[start + 18..];
-            let end = rest.find('\n').unwrap_or(rest.len());
-            let dir = rest[..end].trim();
-            if !dir.is_empty() {
-                return Some(dir.to_string());
-            }
-        }
-        None
+        let start = text.find("Working directory:")?;
+        let rest = &text[start + 18..];
+        let end = rest.find('\n').unwrap_or(rest.len());
+        let dir = rest[..end].trim();
+        if dir.is_empty() { None } else { Some(dir.to_string()) }
     };
 
-    // Check system prompt - can be string or array of content blocks
-    if let Some(system) = request_json.get("system") {
-        // String format
-        if let Some(text) = system.as_str() {
-            if let Some(dir) = search_text(text) {
-                return Some(dir);
+    if let Some(ref system) = request.system {
+        match system {
+            SystemContent::Text(t) => {
+                if let Some(dir) = search_text(t) {
+                    return Some(dir);
+                }
             }
-        }
-        // Array format: [{"type": "text", "text": "..."}]
-        if let Some(blocks) = system.as_array() {
-            for block in blocks {
-                if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
-                    if let Some(dir) = search_text(text) {
-                        return Some(dir);
+            SystemContent::Blocks(blocks) => {
+                for block in blocks {
+                    if let ContentBlock::Text { text } = block {
+                        if let Some(dir) = search_text(text) {
+                            return Some(dir);
+                        }
                     }
                 }
             }
         }
     }
 
-    // Check messages for system content
-    if let Some(messages) = request_json.get("messages").and_then(|m| m.as_array()) {
-        for msg in messages {
-            if let Some(content) = msg.get("content").and_then(|c| c.as_str()) {
-                if let Some(dir) = search_text(content) {
+    for msg in &request.messages {
+        match &msg.content {
+            MessageContent::Text(t) => {
+                if let Some(dir) = search_text(t) {
                     return Some(dir);
+                }
+            }
+            MessageContent::Blocks(blocks) => {
+                for block in blocks {
+                    if let ContentBlock::Text { text } = block {
+                        if let Some(dir) = search_text(text) {
+                            return Some(dir);
+                        }
+                    }
                 }
             }
         }
@@ -381,36 +386,8 @@ fn extract_working_directory(request_json: &serde_json::Value) -> Option<String>
     None
 }
 
-/// Extract Claude session_id from request.
-/// Checks two locations because different request types store it differently:
-/// - Messages API (/v1/messages): embedded in metadata.user_id, also has working directory
-/// - Telemetry (/api/event_logging/batch): directly in events[].event_data.session_id
-fn extract_claude_session_id(request_json: &serde_json::Value) -> Option<String> {
-    extract_session_id_from_metadata_user_id(request_json)
-        .or_else(|| extract_session_id_from_events(request_json))
-}
-
-/// Extract session_id from Messages API requests.
-/// The user_id field has format: user_xxx_account_xxx_session_<uuid>
-fn extract_session_id_from_metadata_user_id(request_json: &serde_json::Value) -> Option<String> {
-    request_json
-        .get("metadata")?
-        .get("user_id")?
-        .as_str()?
-        .rsplit_once("_session_")
-        .map(|(_, session)| session.to_string())
-        .filter(|s| !s.is_empty())
-}
-
-/// Extract session_id from Telemetry requests.
-/// Telemetry batches contain events with session_id in event_data.
-fn extract_session_id_from_events(request_json: &serde_json::Value) -> Option<String> {
-    let events = request_json.get("events")?.as_array()?;
-    events.iter().find_map(|event| {
-        event
-            .get("event_data")?
-            .get("session_id")?
-            .as_str()
-            .map(|s| s.to_string())
-    })
+fn extract_claude_session_id(request: &Option<AnthropicRequest>) -> Option<String> {
+    let user_id = request.as_ref()?.metadata.as_ref()?.user_id.as_ref()?;
+    let (_, session) = user_id.rsplit_once("_session_")?;
+    if session.is_empty() { None } else { Some(session.to_string()) }
 }

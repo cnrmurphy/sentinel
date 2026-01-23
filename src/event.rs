@@ -43,9 +43,9 @@ impl From<ParsedResponse> for AssistantResponse {
     fn from(parsed: ParsedResponse) -> Self {
         Self {
             streaming: parsed.streaming,
-            model: parsed.metadata.get("model").and_then(|v| v.as_str()).map(String::from),
-            message_id: parsed.metadata.get("message_id").and_then(|v| v.as_str()).map(String::from),
-            stop_reason: parsed.metadata.get("stop_reason").and_then(|v| v.as_str()).map(String::from),
+            model: parsed.metadata.model,
+            message_id: parsed.metadata.message_id,
+            stop_reason: parsed.metadata.stop_reason,
             thinking: parsed.thinking,
             text: parsed.text,
             tool_calls: parsed.tool_calls,
