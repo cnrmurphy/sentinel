@@ -1,4 +1,5 @@
 mod agent;
+mod event;
 mod parsers;
 mod proxy;
 mod sse;
@@ -14,7 +15,8 @@ use tracing::info;
 use uuid::Uuid;
 
 use crate::agent::{AgentStatus, AgentStore};
-use crate::proxy::{proxy_handler, ObservabilityEvent, ProxyState};
+use crate::event::ObservabilityEvent;
+use crate::proxy::{proxy_handler, ProxyState};
 use crate::sse::sse_handler;
 use crate::storage::{EventType, Storage};
 

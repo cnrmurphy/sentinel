@@ -239,6 +239,49 @@ impl ResponseParser for AnthropicParser {
     }
 }
 
+pub fn extract_user_message_text(request_json: &serde_json::Value) -> Option<String> {
+    let messages = request_json.get("messages")?.as_array()?;
+
+    let user_msg = messages
+        .iter()
+        .rev()
+        .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))?;
+
+    extract_content_text(user_msg.get("content")?)
+}
+
+pub fn extract_model(request_json: &serde_json::Value) -> Option<String> {
+    request_json
+        .get("model")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+}
+
+fn extract_content_text(content: &serde_json::Value) -> Option<String> {
+    match content {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Array(blocks) => {
+            let texts: Vec<&str> = blocks
+                .iter()
+                .filter_map(|block| {
+                    if block.get("type").and_then(|t| t.as_str()) == Some("text") {
+                        block.get("text").and_then(|t| t.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            if texts.is_empty() {
+                None
+            } else {
+                Some(texts.join("\n"))
+            }
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -12,18 +12,11 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::agent::AgentStore;
-use crate::parsers::ResponseParser;
+use crate::event::{ObservabilityEvent, Payload, UserMessage};
+use crate::parsers::{extract_model, extract_user_message_text, ResponseParser};
 use crate::storage::{Event, Storage};
 
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com";
-
-#[derive(Clone, Debug, serde::Serialize)]
-pub struct ObservabilityEvent {
-    pub id: Uuid,
-    pub timestamp: chrono::DateTime<chrono::Utc>,
-    pub event_type: String,
-    pub data: serde_json::Value,
-}
 
 #[derive(Clone)]
 pub struct ProxyState {
@@ -97,15 +90,22 @@ pub async fn proxy_handler(
             tracing::error!("Failed to store request event: {}", e);
         }
 
-        let _ = state.event_broadcaster.send(ObservabilityEvent {
-            id: request_event.id,
-            timestamp: request_event.timestamp,
-            event_type: "request".to_string(),
-            data: request_event.data.clone(),
-        });
+        if let Some(text) = extract_user_message_text(&request_json) {
+            let _ = state.event_broadcaster.send(ObservabilityEvent {
+                seq: None,
+                id: request_event.id,
+                timestamp: request_event.timestamp,
+                session_id: claude_session_id.clone(),
+                agent: agent_name.clone(),
+                payload: Payload::UserMessage(UserMessage {
+                    model: extract_model(&request_json),
+                    text,
+                }),
+            });
+        }
     }
 
-    let agent_info = agent_name.map(|n| format!(" [{}]", n)).unwrap_or_default();
+    let agent_info = agent_name.as_ref().map(|n| format!(" [{}]", n)).unwrap_or_default();
     if !is_telemetry {
         info!(
             "→ {} {}{} ({} bytes)",
@@ -154,9 +154,9 @@ pub async fn proxy_handler(
     let is_streaming = content_type.contains("text/event-stream");
 
     if is_streaming {
-        handle_streaming_response(state, response, status, response_headers, is_telemetry).await
+        handle_streaming_response(state, response, status, response_headers, is_telemetry, claude_session_id, agent_name).await
     } else {
-        handle_regular_response(state, response, status, response_headers, is_telemetry).await
+        handle_regular_response(state, response, status, response_headers, is_telemetry, claude_session_id, agent_name).await
     }
 }
 
@@ -166,6 +166,8 @@ async fn handle_streaming_response(
     status: reqwest::StatusCode,
     response_headers: reqwest::header::HeaderMap,
     is_telemetry: bool,
+    claude_session_id: Option<String>,
+    agent_name: Option<String>,
 ) -> Result<Response<Body>, StatusCode> {
     let mut stream = response.bytes_stream();
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(32);
@@ -209,25 +211,7 @@ async fn handle_streaming_response(
         // Parse the streaming response into structured data
         let parsed = parser.parse_streaming(&response_text);
 
-        let response_event = Event::response(
-            session_id,
-            serde_json::json!({
-                "streaming": true,
-                "parsed": parsed,
-            }),
-        );
-        if let Err(e) = storage.insert_event(&response_event).await {
-            tracing::error!("Failed to store response event: {}", e);
-        }
-
-        let _ = event_broadcaster.send(ObservabilityEvent {
-            id: response_event.id,
-            timestamp: response_event.timestamp,
-            event_type: "response".to_string(),
-            data: response_event.data.clone(),
-        });
-
-        // Log a summary
+        // Log a summary before consuming parsed
         let text_preview = parsed.text.as_ref().map(|t| {
             let preview: String = t.chars().take(50).collect();
             if t.len() > 50 {
@@ -236,6 +220,27 @@ async fn handle_streaming_response(
                 preview
             }
         });
+
+        let response_event = Event::response(
+            session_id,
+            serde_json::json!({
+                "streaming": true,
+                "parsed": &parsed,
+            }),
+        );
+        if let Err(e) = storage.insert_event(&response_event).await {
+            tracing::error!("Failed to store response event: {}", e);
+        }
+
+        let _ = event_broadcaster.send(ObservabilityEvent {
+            seq: None,
+            id: response_event.id,
+            timestamp: response_event.timestamp,
+            session_id: claude_session_id,
+            agent: agent_name,
+            payload: Payload::AssistantResponse(parsed.into()),
+        });
+
         info!(
             "← Streaming response complete ({} bytes) text={:?}",
             full_response.len(),
@@ -264,6 +269,8 @@ async fn handle_regular_response(
     status: reqwest::StatusCode,
     response_headers: reqwest::header::HeaderMap,
     is_telemetry: bool,
+    claude_session_id: Option<String>,
+    agent_name: Option<String>,
 ) -> Result<Response<Body>, StatusCode> {
     let response_bytes = match response.bytes().await {
         Ok(bytes) => bytes,
@@ -291,18 +298,23 @@ async fn handle_regular_response(
             serde_json::json!({
                 "status": status.as_u16(),
                 "body": response_json,
-                "parsed": parsed,
+                "parsed": &parsed,
             }),
         );
         if let Err(e) = state.storage.insert_event(&response_event).await {
             tracing::error!("Failed to store response event: {}", e);
         }
-        let _ = state.event_broadcaster.send(ObservabilityEvent {
-            id: response_event.id,
-            timestamp: response_event.timestamp,
-            event_type: "response".to_string(),
-            data: response_event.data.clone(),
-        });
+
+        if let Some(parsed) = parsed {
+            let _ = state.event_broadcaster.send(ObservabilityEvent {
+                seq: None,
+                id: response_event.id,
+                timestamp: response_event.timestamp,
+                session_id: claude_session_id,
+                agent: agent_name,
+                payload: Payload::AssistantResponse(parsed.into()),
+            });
+        }
 
         info!("← {} ({} bytes)", status, response_bytes.len());
     }

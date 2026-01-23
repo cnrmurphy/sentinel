@@ -7,7 +7,8 @@ use axum::{
 use futures_util::Stream;
 use tokio::sync::broadcast::error::RecvError;
 
-use crate::proxy::{ObservabilityEvent, ProxyState};
+use crate::event::ObservabilityEvent;
+use crate::proxy::ProxyState;
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
