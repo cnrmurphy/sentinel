@@ -49,8 +49,9 @@ pub async fn sse_handler(
                     yield Ok(Event::default()
                         .event("message")
                         .data(json));
+                    continue;
                 },
-                Err(RecvError::Closed) => {continue},
+                Err(RecvError::Closed) => {break},
             }
         }
     };
