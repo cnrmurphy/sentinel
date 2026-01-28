@@ -189,8 +189,15 @@ function EventItem({ event }: { event: ObservabilityEvent }) {
   );
 }
 
-export function EventList() {
-  const { events, connected, error, clearEvents } = useSSE('/api/events');
+interface EventListProps {
+  agentName?: string;
+}
+
+export function EventList({ agentName }: EventListProps) {
+  const sseUrl = agentName
+    ? `/api/events?agent=${encodeURIComponent(agentName)}`
+    : '/api/events';
+  const { events, connected, error, clearEvents } = useSSE(sseUrl);
 
   return (
     <div
@@ -209,7 +216,16 @@ export function EventList() {
           marginBottom: '16px',
         }}
       >
-        <h1 style={{ margin: 0, fontSize: '20px' }}>Sentinel Events</h1>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          {agentName && (
+            <a href="#/" style={{ color: '#60a5fa', textDecoration: 'none', fontSize: '14px' }}>
+              &larr; Agents
+            </a>
+          )}
+          <h1 style={{ margin: 0, fontSize: '20px' }}>
+            {agentName ? `${agentName}` : 'Sentinel Events'}
+          </h1>
+        </div>
         <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
           <span
             style={{
