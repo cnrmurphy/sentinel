@@ -1,5 +1,6 @@
+use axum::extract::State;
 use axum::routing::get;
-use axum::Router;
+use axum::{Json, Router};
 use clap::{Parser, Subcommand};
 use reqwest::Client;
 use std::sync::Arc;
@@ -7,7 +8,7 @@ use tokio::sync::broadcast;
 use tracing::info;
 use uuid::Uuid;
 
-use crate::agent::{AgentStatus, AgentStore};
+use crate::agent::{Agent, AgentStatus, AgentStore};
 use crate::event::ObservabilityEvent;
 use crate::parsers::AnthropicParser;
 use crate::proxy::{proxy_handler, ProxyState};
@@ -86,6 +87,15 @@ fn get_data_dir() -> std::path::PathBuf {
         })
 }
 
+async fn agents_handler(
+    State(state): State<Arc<ProxyState>>,
+) -> Json<Vec<Agent>> {
+    match state.agent_store.list_all().await {
+        Ok(agents) => Json(agents),
+        Err(_) => Json(vec![]),
+    }
+}
+
 async fn run_proxy(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -122,8 +132,9 @@ async fn run_proxy(port: u16) -> Result<(), Box<dyn std::error::Error>> {
         event_broadcaster,
     });
 
-    // /api/events must be registered before the fallback
+    // API routes must be registered before the fallback
     let app = Router::new()
+        .route("/api/agents", get(agents_handler))
         .route("/api/events", get(sse_handler))
         .fallback(proxy_handler)
         .with_state(state);
