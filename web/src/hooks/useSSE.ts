@@ -1,10 +1,52 @@
 import { useEffect, useState, useCallback } from 'react';
 
+export interface ToolCall {
+  id: string;
+  name: string;
+  input: Record<string, unknown>;
+}
+
+export interface Usage {
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cache_read_tokens: number | null;
+  cache_creation_tokens: number | null;
+}
+
+export interface UserMessage {
+  type: 'user_message';
+  model: string | null;
+  text: string;
+}
+
+export interface AssistantResponse {
+  type: 'assistant_response';
+  streaming: boolean;
+  model: string | null;
+  message_id: string | null;
+  stop_reason: string | null;
+  thinking: string | null;
+  text: string | null;
+  tool_calls: ToolCall[];
+  usage: Usage | null;
+}
+
+export type Payload = UserMessage | AssistantResponse;
+
 export interface ObservabilityEvent {
+  seq: number | null;
   id: string;
   timestamp: string;
-  event_type: 'request' | 'response';
-  data: Record<string, unknown>;
+  session_id: string | null;
+  agent: string | null;
+  payload: Payload;
+}
+
+interface SSeMessageEnvelope {
+  type: 'observability_event' | 'resync_required';
+  payload:
+    | { event: ObservabilityEvent }
+    | { events_dropped: number; latest_seq: number };
 }
 
 export function useSSE(url: string) {
@@ -29,18 +71,22 @@ export function useSSE(url: string) {
       setError('Connection lost. Retrying...');
     };
 
-    // Listen for both event types
-    const handleEvent = (e: MessageEvent) => {
+    const handleMessage = (e: MessageEvent) => {
       try {
-        const event: ObservabilityEvent = JSON.parse(e.data);
-        setEvents((prev) => [...prev, event]);
+        const envelope: SSeMessageEnvelope = JSON.parse(e.data);
+
+        if (envelope.type === 'observability_event') {
+          const { event } = envelope.payload as { event: ObservabilityEvent };
+          setEvents((prev) => [...prev, event]);
+        } else if (envelope.type === 'resync_required') {
+          console.warn('Events dropped, resync required:', envelope.payload);
+        }
       } catch (err) {
         console.error('Failed to parse event:', err);
       }
     };
 
-    eventSource.addEventListener('request', handleEvent);
-    eventSource.addEventListener('response', handleEvent);
+    eventSource.addEventListener('message', handleMessage);
 
     return () => {
       eventSource.close();

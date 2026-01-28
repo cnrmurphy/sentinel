@@ -2,34 +2,6 @@ import { useState } from 'react';
 import { useSSE } from '../hooks/useSSE';
 import type { ObservabilityEvent } from '../hooks/useSSE';
 
-interface Message {
-  role: string;
-  content: string | Array<{ type: string; text?: string }>;
-}
-
-interface ParsedResponse {
-  text?: string;
-  thinking?: string;
-  tool_calls?: Array<{ name: string; input: Record<string, unknown> }>;
-  usage?: { input_tokens: number; output_tokens: number };
-}
-
-function getLastUserMessage(messages: Message[]): string | null {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i].role === 'user') {
-      const content = messages[i].content;
-      if (typeof content === 'string') {
-        return content;
-      }
-      if (Array.isArray(content)) {
-        const textBlock = content.find((b) => b.type === 'text');
-        return textBlock?.text ?? null;
-      }
-    }
-  }
-  return null;
-}
-
 function truncate(text: string, maxLen: number): string {
   if (text.length <= maxLen) return text;
   return text.slice(0, maxLen) + '...';
@@ -37,36 +9,23 @@ function truncate(text: string, maxLen: number): string {
 
 function EventItem({ event }: { event: ObservabilityEvent }) {
   const [expanded, setExpanded] = useState(false);
-  const isRequest = event.event_type === 'request';
-  const arrow = isRequest ? '→' : '←';
-  const color = isRequest ? '#4ade80' : '#60a5fa';
+  const isUserMessage = event.payload.type === 'user_message';
+  const arrow = isUserMessage ? '→' : '←';
+  const color = isUserMessage ? '#4ade80' : '#60a5fa';
   const time = new Date(event.timestamp).toLocaleTimeString();
 
-  // Extract summary info
-  const agent = event.data.agent as string | undefined;
-  const method = event.data.method as string | undefined;
-  const path = event.data.path as string | undefined;
-  const status = event.data.status as number | undefined;
-  const body = event.data.body as Record<string, unknown> | undefined;
-  const parsed = event.data.parsed as ParsedResponse | undefined;
-
-  // Request-specific
-  const messages = body?.messages as Message[] | undefined;
-  const model = body?.model as string | undefined;
-  const lastUserMessage = messages ? getLastUserMessage(messages) : null;
-
-  // Response-specific
-  const responseText = parsed?.text;
-  const thinking = parsed?.thinking;
-  const toolCalls = parsed?.tool_calls;
-  const usage = parsed?.usage;
+  const agent = event.agent;
+  const model = isUserMessage
+    ? event.payload.model
+    : event.payload.model;
+  const usage = !isUserMessage ? event.payload.usage : null;
 
   // Build summary
   let summary = '';
-  if (isRequest && lastUserMessage) {
-    summary = truncate(lastUserMessage, 80);
-  } else if (!isRequest && responseText) {
-    summary = truncate(responseText, 80);
+  if (isUserMessage) {
+    summary = truncate(event.payload.text, 80);
+  } else if (event.payload.text) {
+    summary = truncate(event.payload.text, 80);
   }
 
   return (
@@ -90,19 +49,14 @@ function EventItem({ event }: { event: ObservabilityEvent }) {
         <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
           <span style={{ color: '#888' }}>{time}</span>
           <span style={{ color, fontWeight: 'bold' }}>{arrow}</span>
-          <span style={{ color }}>{event.event_type}</span>
+          <span style={{ color }}>
+            {isUserMessage ? 'request' : 'response'}
+          </span>
           {agent && <span style={{ color: '#f59e0b' }}>[{agent}]</span>}
-          {method && <span>{method}</span>}
-          {path && <span style={{ color: '#888' }}>{path}</span>}
-          {status && (
-            <span style={{ color: status < 400 ? '#4ade80' : '#ef4444' }}>
-              {status}
-            </span>
-          )}
           {model && <span style={{ color: '#a78bfa' }}>{model}</span>}
           {usage && (
             <span style={{ color: '#888' }}>
-              {usage.input_tokens}→{usage.output_tokens} tokens
+              {usage.input_tokens ?? 0}→{usage.output_tokens ?? 0} tokens
             </span>
           )}
           <span style={{ marginLeft: 'auto', color: '#555' }}>
@@ -124,8 +78,8 @@ function EventItem({ event }: { event: ObservabilityEvent }) {
             gap: '12px',
           }}
         >
-          {/* Request: Show last user message */}
-          {isRequest && lastUserMessage && (
+          {/* Request: Show user message text */}
+          {isUserMessage && (
             <div>
               <div style={{ color: '#4ade80', marginBottom: '4px' }}>
                 User prompt:
@@ -142,13 +96,13 @@ function EventItem({ event }: { event: ObservabilityEvent }) {
                   overflow: 'auto',
                 }}
               >
-                {lastUserMessage}
+                {event.payload.text}
               </pre>
             </div>
           )}
 
           {/* Response: Show thinking */}
-          {!isRequest && thinking && (
+          {!isUserMessage && event.payload.thinking && (
             <div>
               <div style={{ color: '#f59e0b', marginBottom: '4px' }}>
                 Thinking:
@@ -166,13 +120,13 @@ function EventItem({ event }: { event: ObservabilityEvent }) {
                   color: '#f59e0b',
                 }}
               >
-                {thinking}
+                {event.payload.thinking}
               </pre>
             </div>
           )}
 
           {/* Response: Show text */}
-          {!isRequest && responseText && (
+          {!isUserMessage && event.payload.text && (
             <div>
               <div style={{ color: '#60a5fa', marginBottom: '4px' }}>
                 Response:
@@ -189,20 +143,20 @@ function EventItem({ event }: { event: ObservabilityEvent }) {
                   overflow: 'auto',
                 }}
               >
-                {responseText}
+                {event.payload.text}
               </pre>
             </div>
           )}
 
           {/* Response: Show tool calls */}
-          {!isRequest && toolCalls && toolCalls.length > 0 && (
+          {!isUserMessage && event.payload.tool_calls.length > 0 && (
             <div>
               <div style={{ color: '#a78bfa', marginBottom: '4px' }}>
-                Tool calls ({toolCalls.length}):
+                Tool calls ({event.payload.tool_calls.length}):
               </div>
-              {toolCalls.map((tool, i) => (
+              {event.payload.tool_calls.map((tool, i) => (
                 <div
-                  key={i}
+                  key={tool.id || i}
                   style={{
                     padding: '8px',
                     backgroundColor: '#252525',
@@ -227,13 +181,6 @@ function EventItem({ event }: { event: ObservabilityEvent }) {
                   </pre>
                 </div>
               ))}
-            </div>
-          )}
-
-          {/* Messages count for requests */}
-          {isRequest && messages && (
-            <div style={{ color: '#666', fontSize: '11px' }}>
-              {messages.length} message(s) in conversation
             </div>
           )}
         </div>
