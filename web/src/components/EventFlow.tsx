@@ -81,8 +81,35 @@ function EventFlowInner({ events, followLatest }: EventFlowInnerProps) {
     const nodes: Node[] = [];
     const edges: Edge[] = [];
 
-    // Get the ID of the latest event
-    const latestEventId = events.length > 0 ? events[events.length - 1].id : null;
+    // Find assistant_response with tool_calls that comes after the most recent user_message
+    // in the same session (to filter out internal system noise)
+    let awaitingInputEventId: string | null = null;
+
+    // First, find the most recent user_message and its session
+    let lastUserMessageSession: string | null = null;
+    let lastUserMessageIndex = -1;
+    for (let i = events.length - 1; i >= 0; i--) {
+      if (events[i].payload.type === 'user_message' && events[i].session_id) {
+        lastUserMessageSession = events[i].session_id;
+        lastUserMessageIndex = i;
+        break;
+      }
+    }
+
+    // Now find tool_calls AFTER that user_message in the same session
+    if (lastUserMessageSession && lastUserMessageIndex >= 0) {
+      for (let i = events.length - 1; i > lastUserMessageIndex; i--) {
+        const event = events[i];
+        if (
+          event.session_id === lastUserMessageSession &&
+          event.payload.type === 'assistant_response' &&
+          event.payload.tool_calls.length > 0
+        ) {
+          awaitingInputEventId = event.id;
+          break;
+        }
+      }
+    }
 
     let yOffset = 0;
     let prevNodeId: string | null = null;
@@ -155,7 +182,7 @@ function EventFlowInner({ events, followLatest }: EventFlowInnerProps) {
           id: nodeId,
           type: 'event',
           position: { x: -NODE_WIDTH / 2, y: yOffset },
-          data: { event, isLatest: event.id === latestEventId } as EventNodeData,
+          data: { event, isLatest: event.id === awaitingInputEventId } as EventNodeData,
           draggable: false,
         });
 
@@ -235,7 +262,7 @@ function EventFlowInner({ events, followLatest }: EventFlowInnerProps) {
             position: { x: TOPIC_PADDING, y: topicYOffset },
             parentId: topicGroupId,
             extent: 'parent',
-            data: { event, isLatest: event.id === latestEventId } as EventNodeData,
+            data: { event, isLatest: event.id === awaitingInputEventId } as EventNodeData,
             draggable: false,
           });
 
@@ -262,7 +289,7 @@ function EventFlowInner({ events, followLatest }: EventFlowInnerProps) {
     }
 
     return { nodes, edges };
-  }, [groupedEvents]);
+  }, [groupedEvents, events]);
 
   // Helper to get absolute position (accounting for parent nodes)
   const getAbsolutePosition = useCallback((node: Node) => {
