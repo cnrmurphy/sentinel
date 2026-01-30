@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useSSE } from '../hooks/useSSE';
 import type { ObservabilityEvent } from '../hooks/useSSE';
 
@@ -9,23 +9,22 @@ function truncate(text: string, maxLen: number): string {
 
 function EventItem({ event }: { event: ObservabilityEvent }) {
   const [expanded, setExpanded] = useState(false);
-  const isUserMessage = event.payload.type === 'user_message';
+  const payload = event.payload;
+  const isUserMessage = payload.type === 'user_message';
   const arrow = isUserMessage ? '→' : '←';
   const color = isUserMessage ? '#4ade80' : '#60a5fa';
   const time = new Date(event.timestamp).toLocaleTimeString();
 
   const agent = event.agent;
-  const model = isUserMessage
-    ? event.payload.model
-    : event.payload.model;
-  const usage = !isUserMessage ? event.payload.usage : null;
+  const model = payload.model;
+  const usage = payload.type === 'assistant_response' ? payload.usage : null;
 
   // Build summary
   let summary = '';
-  if (isUserMessage) {
-    summary = truncate(event.payload.text, 80);
-  } else if (event.payload.text) {
-    summary = truncate(event.payload.text, 80);
+  if (payload.type === 'user_message') {
+    summary = truncate(payload.text, 80);
+  } else if (payload.text) {
+    summary = truncate(payload.text, 80);
   }
 
   return (
@@ -79,7 +78,7 @@ function EventItem({ event }: { event: ObservabilityEvent }) {
           }}
         >
           {/* Request: Show user message text */}
-          {isUserMessage && (
+          {payload.type === 'user_message' && (
             <div>
               <div style={{ color: '#4ade80', marginBottom: '4px' }}>
                 User prompt:
@@ -96,13 +95,13 @@ function EventItem({ event }: { event: ObservabilityEvent }) {
                   overflow: 'auto',
                 }}
               >
-                {event.payload.text}
+                {payload.text}
               </pre>
             </div>
           )}
 
           {/* Response: Show thinking */}
-          {!isUserMessage && event.payload.thinking && (
+          {payload.type === 'assistant_response' && payload.thinking && (
             <div>
               <div style={{ color: '#f59e0b', marginBottom: '4px' }}>
                 Thinking:
@@ -120,13 +119,13 @@ function EventItem({ event }: { event: ObservabilityEvent }) {
                   color: '#f59e0b',
                 }}
               >
-                {event.payload.thinking}
+                {payload.thinking}
               </pre>
             </div>
           )}
 
           {/* Response: Show text */}
-          {!isUserMessage && event.payload.text && (
+          {payload.type === 'assistant_response' && payload.text && (
             <div>
               <div style={{ color: '#60a5fa', marginBottom: '4px' }}>
                 Response:
@@ -143,46 +142,47 @@ function EventItem({ event }: { event: ObservabilityEvent }) {
                   overflow: 'auto',
                 }}
               >
-                {event.payload.text}
+                {payload.text}
               </pre>
             </div>
           )}
 
           {/* Response: Show tool calls */}
-          {!isUserMessage && event.payload.tool_calls.length > 0 && (
-            <div>
-              <div style={{ color: '#a78bfa', marginBottom: '4px' }}>
-                Tool calls ({event.payload.tool_calls.length}):
-              </div>
-              {event.payload.tool_calls.map((tool, i) => (
-                <div
-                  key={tool.id || i}
-                  style={{
-                    padding: '8px',
-                    backgroundColor: '#252525',
-                    borderRadius: '4px',
-                    marginBottom: '4px',
-                  }}
-                >
-                  <div style={{ color: '#a78bfa' }}>{tool.name}</div>
-                  <pre
+          {payload.type === 'assistant_response' &&
+            payload.tool_calls.length > 0 && (
+              <div>
+                <div style={{ color: '#a78bfa', marginBottom: '4px' }}>
+                  Tool calls ({payload.tool_calls.length}):
+                </div>
+                {payload.tool_calls.map((tool, i) => (
+                  <div
+                    key={tool.id || i}
                     style={{
-                      margin: 0,
-                      marginTop: '4px',
-                      whiteSpace: 'pre-wrap',
-                      wordBreak: 'break-word',
-                      fontSize: '11px',
-                      color: '#888',
-                      maxHeight: '150px',
-                      overflow: 'auto',
+                      padding: '8px',
+                      backgroundColor: '#252525',
+                      borderRadius: '4px',
+                      marginBottom: '4px',
                     }}
                   >
-                    {JSON.stringify(tool.input, null, 2)}
-                  </pre>
-                </div>
-              ))}
-            </div>
-          )}
+                    <div style={{ color: '#a78bfa' }}>{tool.name}</div>
+                    <pre
+                      style={{
+                        margin: 0,
+                        marginTop: '4px',
+                        whiteSpace: 'pre-wrap',
+                        wordBreak: 'break-word',
+                        fontSize: '11px',
+                        color: '#888',
+                        maxHeight: '150px',
+                        overflow: 'auto',
+                      }}
+                    >
+                      {JSON.stringify(tool.input, null, 2)}
+                    </pre>
+                  </div>
+                ))}
+              </div>
+            )}
         </div>
       )}
     </div>
@@ -194,10 +194,32 @@ interface EventListProps {
 }
 
 export function EventList({ agentName }: EventListProps) {
+  const [initialEvents, setInitialEvents] = useState<
+    ObservabilityEvent[] | undefined
+  >(undefined);
+
+  // Fetch historical events when viewing an agent's event log
+  useEffect(() => {
+    if (!agentName) {
+      setInitialEvents(undefined);
+      return;
+    }
+
+    fetch(`/api/agents/${encodeURIComponent(agentName)}/events`)
+      .then((res) => res.json())
+      .then((data: ObservabilityEvent[]) => {
+        setInitialEvents(data);
+      })
+      .catch((err) => {
+        console.error('Failed to fetch historical events:', err);
+        setInitialEvents([]);
+      });
+  }, [agentName]);
+
   const sseUrl = agentName
     ? `/api/events?agent=${encodeURIComponent(agentName)}`
     : '/api/events';
-  const { events, connected, error, clearEvents } = useSSE(sseUrl);
+  const { events, connected, error, clearEvents } = useSSE(sseUrl, initialEvents);
 
   return (
     <div
