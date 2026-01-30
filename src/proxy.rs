@@ -14,7 +14,7 @@ use uuid::Uuid;
 use crate::agent::AgentStore;
 use crate::event::{ObservabilityEvent, Payload, UserMessage};
 use crate::parsers::{AnthropicRequest, ResponseParser};
-use crate::storage::{Event, Storage};
+use crate::storage::Storage;
 
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com";
 
@@ -23,7 +23,6 @@ pub struct ProxyState {
     pub storage: Storage,
     pub agent_store: AgentStore,
     pub http_client: Client,
-    pub session_id: Uuid,
     pub parser: Arc<dyn ResponseParser>,
     pub event_broadcaster: tokio::sync::broadcast::Sender<ObservabilityEvent>,
 }
@@ -45,8 +44,7 @@ pub async fn proxy_handler(
         }
     };
 
-    // Parse request body as JSON for storage and typed access
-    let request_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap_or_default();
+    // Parse request body for typed access
     let request: Option<AnthropicRequest> = serde_json::from_slice(&body_bytes).ok();
 
     let claude_session_id = extract_claude_session_id(&request);
@@ -72,36 +70,27 @@ pub async fn proxy_handler(
     // Skip telemetry events - they're just metadata noise
     let is_telemetry = uri.path().contains("event_logging");
 
-    // Log the request (non-blocking, errors logged internally)
-    let request_event = Event::request(
-        state.session_id,
-        serde_json::json!({
-            "method": method.to_string(),
-            "path": uri.path(),
-            "body": request_json,
-            "agent": agent_name,
-            "claude_session_id": claude_session_id,
-        }),
-    );
-
+    // Store and broadcast user message if present
     if !is_telemetry {
-        if let Err(e) = state.storage.insert_event(&request_event).await {
-            tracing::error!("Failed to store request event: {}", e);
-        }
-
         if let Some(ref req) = request {
             if let Some(text) = req.last_user_message_text() {
-                let _ = state.event_broadcaster.send(ObservabilityEvent {
+                let user_event = ObservabilityEvent {
                     seq: None,
-                    id: request_event.id,
-                    timestamp: request_event.timestamp,
+                    id: Uuid::new_v4(),
+                    timestamp: chrono::Utc::now(),
                     session_id: claude_session_id.clone(),
                     agent: agent_name.clone(),
                     payload: Payload::UserMessage(UserMessage {
                         model: Some(req.model.clone()),
                         text,
                     }),
-                });
+                };
+
+                if let Err(e) = state.storage.insert_observability_event(&user_event).await {
+                    tracing::error!("Failed to store user message event: {}", e);
+                }
+
+                let _ = state.event_broadcaster.send(user_event);
             }
         }
     }
@@ -174,7 +163,6 @@ async fn handle_streaming_response(
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(32);
 
     let storage = state.storage.clone();
-    let session_id = state.session_id;
     let parser = state.parser.clone();
     let event_broadcaster = state.event_broadcaster.clone();
 
@@ -222,25 +210,20 @@ async fn handle_streaming_response(
             }
         });
 
-        let response_event = Event::response(
-            session_id,
-            serde_json::json!({
-                "streaming": true,
-                "parsed": &parsed,
-            }),
-        );
-        if let Err(e) = storage.insert_event(&response_event).await {
-            tracing::error!("Failed to store response event: {}", e);
-        }
-
-        let _ = event_broadcaster.send(ObservabilityEvent {
+        let response_event = ObservabilityEvent {
             seq: None,
-            id: response_event.id,
-            timestamp: response_event.timestamp,
+            id: Uuid::new_v4(),
+            timestamp: chrono::Utc::now(),
             session_id: claude_session_id,
             agent: agent_name,
             payload: Payload::AssistantResponse(parsed.into()),
-        });
+        };
+
+        if let Err(e) = storage.insert_observability_event(&response_event).await {
+            tracing::error!("Failed to store response event: {}", e);
+        }
+
+        let _ = event_broadcaster.send(response_event);
 
         info!(
             "← Streaming response complete ({} bytes) text={:?}",
@@ -293,28 +276,22 @@ async fn handle_regular_response(
                 None
             };
 
-        // Log the response
-        let response_event = Event::response(
-            state.session_id,
-            serde_json::json!({
-                "status": status.as_u16(),
-                "body": response_json,
-                "parsed": &parsed,
-            }),
-        );
-        if let Err(e) = state.storage.insert_event(&response_event).await {
-            tracing::error!("Failed to store response event: {}", e);
-        }
-
+        // Store and broadcast response event if parsed
         if let Some(parsed) = parsed {
-            let _ = state.event_broadcaster.send(ObservabilityEvent {
+            let response_event = ObservabilityEvent {
                 seq: None,
-                id: response_event.id,
-                timestamp: response_event.timestamp,
+                id: Uuid::new_v4(),
+                timestamp: chrono::Utc::now(),
                 session_id: claude_session_id,
                 agent: agent_name,
                 payload: Payload::AssistantResponse(parsed.into()),
-            });
+            };
+
+            if let Err(e) = state.storage.insert_observability_event(&response_event).await {
+                tracing::error!("Failed to store response event: {}", e);
+            }
+
+            let _ = state.event_broadcaster.send(response_event);
         }
 
         info!("← {} ({} bytes)", status, response_bytes.len());
