@@ -34,17 +34,6 @@ function EventNodeComponent({ data }: EventNodeProps) {
     payload.type === 'assistant_response' &&
     payload.tool_calls.length > 0;
 
-  // Debug logging
-  if (isLatest && payload.type === 'assistant_response') {
-    console.log('Latest response:', {
-      isLatest,
-      stop_reason: payload.stop_reason,
-      tool_calls_count: payload.tool_calls.length,
-      tool_calls: payload.tool_calls,
-      isAwaitingInput
-    });
-  }
-
   let summary = '';
   if (payload.type === 'user_message') {
     summary = truncate(payload.text, 60);
