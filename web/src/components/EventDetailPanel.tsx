@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import type { ObservabilityEvent } from '../hooks/useSSE';
 
 interface EventDetailPanelProps {
@@ -6,18 +7,51 @@ interface EventDetailPanelProps {
   onClose: () => void;
 }
 
+const PANEL_WIDTH = 400;
+const PANEL_MAX_HEIGHT = 500;
+const VIEWPORT_PADDING = 16;
+
 export function EventDetailPanel({ event, position, onClose }: EventDetailPanelProps) {
   const payload = event.payload;
   const isUserMessage = payload.type === 'user_message';
+
+  // Clamp position to keep panel within viewport
+  const clampedPosition = useMemo(() => {
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+
+    let x = position.x;
+    let y = position.y;
+
+    // Clamp horizontal - if panel would go off right edge, move it left
+    if (x + PANEL_WIDTH + VIEWPORT_PADDING > viewportWidth) {
+      x = viewportWidth - PANEL_WIDTH - VIEWPORT_PADDING;
+    }
+    // Don't go off left edge
+    if (x < VIEWPORT_PADDING) {
+      x = VIEWPORT_PADDING;
+    }
+
+    // Clamp vertical - if panel would go off bottom, move it up
+    if (y + PANEL_MAX_HEIGHT + VIEWPORT_PADDING > viewportHeight) {
+      y = viewportHeight - PANEL_MAX_HEIGHT - VIEWPORT_PADDING;
+    }
+    // Don't go off top edge
+    if (y < VIEWPORT_PADDING) {
+      y = VIEWPORT_PADDING;
+    }
+
+    return { x, y };
+  }, [position.x, position.y]);
 
   return (
     <div
       style={{
         position: 'absolute',
-        left: position.x,
-        top: position.y,
-        width: '400px',
-        maxHeight: '500px',
+        left: clampedPosition.x,
+        top: clampedPosition.y,
+        width: `${PANEL_WIDTH}px`,
+        maxHeight: `${PANEL_MAX_HEIGHT}px`,
         backgroundColor: '#1e1e1e',
         border: '1px solid #444',
         borderRadius: '8px',

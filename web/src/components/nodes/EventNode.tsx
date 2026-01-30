@@ -4,7 +4,6 @@ import type { ObservabilityEvent } from '../../hooks/useSSE';
 
 export interface EventNodeData extends Record<string, unknown> {
   event: ObservabilityEvent;
-  selected: boolean;
 }
 
 function truncate(text: string, maxLen: number): string {
@@ -17,7 +16,7 @@ interface EventNodeProps {
 }
 
 function EventNodeComponent({ data }: EventNodeProps) {
-  const { event, selected } = data;
+  const { event } = data;
   const payload = event.payload;
   const isUserMessage = payload.type === 'user_message';
   const arrow = isUserMessage ? '→' : '←';
@@ -41,10 +40,12 @@ function EventNodeComponent({ data }: EventNodeProps) {
     <>
       <Handle type="target" position={Position.Top} style={{ visibility: 'hidden' }} />
       <div
+        className="event-node"
+        data-type={isUserMessage ? 'request' : 'response'}
         style={{
           padding: '10px 14px',
-          backgroundColor: selected ? '#2a2a2a' : '#1e1e1e',
-          border: `2px solid ${selected ? color : '#333'}`,
+          backgroundColor: '#1e1e1e',
+          border: '2px solid #333',
           borderRadius: '8px',
           fontFamily: 'monospace',
           fontSize: '12px',
