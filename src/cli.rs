@@ -6,14 +6,13 @@ use reqwest::Client;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tracing::info;
-use uuid::Uuid;
 
 use crate::agent::{Agent, AgentStatus, AgentStore};
-use crate::event::ObservabilityEvent;
+use crate::event::{ObservabilityEvent, Payload};
 use crate::parsers::AnthropicParser;
 use crate::proxy::{proxy_handler, ProxyState};
 use crate::sse::sse_handler;
-use crate::storage::{EventType, Storage};
+use crate::storage::Storage;
 
 #[derive(Parser)]
 #[command(name = "sentinel")]
@@ -36,9 +35,6 @@ enum Commands {
         /// Maximum number of events to show
         #[arg(short, long, default_value = "20")]
         limit: i64,
-        /// Filter by event type (request, response)
-        #[arg(short = 't', long)]
-        event_type: Option<String>,
         /// Show raw JSON data
         #[arg(long)]
         raw: bool,
@@ -59,12 +55,8 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Start { port } => {
             run_proxy(port).await?;
         }
-        Commands::Logs {
-            limit,
-            event_type,
-            raw,
-        } => {
-            show_logs(limit, event_type, raw).await?;
+        Commands::Logs { limit, raw } => {
+            show_logs(limit, raw).await?;
         }
         Commands::Agents => {
             show_agents().await?;
@@ -87,11 +79,19 @@ fn get_data_dir() -> std::path::PathBuf {
         })
 }
 
-async fn agents_handler(
-    State(state): State<Arc<ProxyState>>,
-) -> Json<Vec<Agent>> {
+async fn agents_handler(State(state): State<Arc<ProxyState>>) -> Json<Vec<Agent>> {
     match state.agent_store.list_all().await {
         Ok(agents) => Json(agents),
+        Err(_) => Json(vec![]),
+    }
+}
+
+async fn agent_events_handler(
+    State(state): State<Arc<ProxyState>>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Json<Vec<ObservabilityEvent>> {
+    match state.storage.get_agent_events(&name, 1000).await {
+        Ok(events) => Json(events),
         Err(_) => Json(vec![]),
     }
 }
@@ -118,16 +118,12 @@ async fn run_proxy(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     let http_client = Client::new();
     let parser = Arc::new(AnthropicParser::new());
 
-    let session_id = Uuid::new_v4();
-    info!("Session ID: {}", session_id);
-
     let (event_broadcaster, _) = broadcast::channel::<ObservabilityEvent>(100);
 
     let state = Arc::new(ProxyState {
         storage,
         agent_store,
         http_client,
-        session_id,
         parser,
         event_broadcaster,
     });
@@ -135,6 +131,7 @@ async fn run_proxy(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     // API routes must be registered before the fallback
     let app = Router::new()
         .route("/api/agents", get(agents_handler))
+        .route("/api/agents/:name/events", get(agent_events_handler))
         .route("/api/events", get(sse_handler))
         .fallback(proxy_handler)
         .with_state(state);
@@ -152,11 +149,7 @@ async fn run_proxy(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn show_logs(
-    limit: i64,
-    event_type: Option<String>,
-    raw: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn show_logs(limit: i64, raw: bool) -> Result<(), Box<dyn std::error::Error>> {
     let data_dir = get_data_dir();
     let db_path = data_dir.join("sentinel.db");
 
@@ -166,9 +159,7 @@ async fn show_logs(
     }
 
     let storage = Storage::new(&db_path).await?;
-    let events = storage
-        .get_recent_events(limit, event_type.as_deref())
-        .await?;
+    let events = storage.get_recent_observability_events(limit).await?;
 
     if events.is_empty() {
         println!("No events found.");
@@ -176,30 +167,30 @@ async fn show_logs(
     }
 
     for event in events.iter().rev() {
-        let type_indicator = match event.event_type {
-            EventType::Request => "→",
-            EventType::Response => "←",
+        let (type_indicator, type_name) = match &event.payload {
+            Payload::UserMessage(_) => ("→", "request"),
+            Payload::AssistantResponse(_) => ("←", "response"),
         };
 
         println!(
             "\n{} {} [{}] {}",
             event.timestamp.format("%Y-%m-%d %H:%M:%S"),
             type_indicator,
-            event.event_type,
+            type_name,
             &event.id.to_string()[..8]
         );
-        println!("  Session: {}", &event.session_id.to_string()[..8]);
+
+        if let Some(ref agent) = event.agent {
+            println!("  Agent: {}", agent);
+        }
 
         if raw {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&event.data).unwrap_or_default()
+                serde_json::to_string_pretty(&event.payload).unwrap_or_default()
             );
         } else {
-            match event.event_type {
-                EventType::Request => print_request_summary(&event.data),
-                EventType::Response => print_response_summary(&event.data),
-            }
+            print_event_summary(&event.payload);
         }
     }
 
@@ -302,53 +293,34 @@ fn truncate_path_for_display(path: &str, max_len: usize) -> String {
     }
 }
 
-fn print_request_summary(data: &serde_json::Value) {
-    if let Some(body) = data.get("body") {
-        if let Some(model) = body.get("model") {
-            println!("  Model: {}", model);
-        }
-        if let Some(messages) = body.get("messages").and_then(|m| m.as_array()) {
-            println!("  Messages: {} message(s)", messages.len());
-            if let Some(last) = messages.last() {
-                if let Some(role) = last.get("role").and_then(|r| r.as_str()) {
-                    println!("  Last role: {}", role);
-                }
+fn print_event_summary(payload: &Payload) {
+    match payload {
+        Payload::UserMessage(msg) => {
+            if let Some(ref model) = msg.model {
+                println!("  Model: {}", model);
             }
+            let preview: String = msg.text.chars().take(80).collect();
+            let ellipsis = if msg.text.len() > 80 { "..." } else { "" };
+            println!("  Text: {}{}", preview, ellipsis);
         }
-    }
-}
-
-fn print_response_summary(data: &serde_json::Value) {
-    if data
-        .get("streaming")
-        .and_then(|s| s.as_bool())
-        .unwrap_or(false)
-    {
-        println!("  [Streaming response]");
-        if let Some(body) = data.get("body").and_then(|b| b.as_str()) {
-            println!("  Size: {} bytes", body.len());
-        }
-    } else {
-        if let Some(status) = data.get("status") {
-            println!("  Status: {}", status);
-        }
-        if let Some(body) = data.get("body") {
-            if let Some(usage) = body.get("usage") {
-                if let (Some(input), Some(output)) = (
-                    usage.get("input_tokens").and_then(|t| t.as_i64()),
-                    usage.get("output_tokens").and_then(|t| t.as_i64()),
-                ) {
-                    println!("  Tokens: {} in / {} out", input, output);
-                }
+        Payload::AssistantResponse(resp) => {
+            if let Some(ref model) = resp.model {
+                println!("  Model: {}", model);
             }
-            if let Some(content) = body.get("content").and_then(|c| c.as_array()) {
-                for item in content {
-                    if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
-                        let preview: String = text.chars().take(80).collect();
-                        let ellipsis = if text.len() > 80 { "..." } else { "" };
-                        println!("  Content: {}{}", preview, ellipsis);
-                    }
-                }
+            if let Some(ref usage) = resp.usage {
+                println!(
+                    "  Tokens: {} in / {} out",
+                    usage.input_tokens.unwrap_or(0),
+                    usage.output_tokens.unwrap_or(0)
+                );
+            }
+            if let Some(ref text) = resp.text {
+                let preview: String = text.chars().take(80).collect();
+                let ellipsis = if text.len() > 80 { "..." } else { "" };
+                println!("  Text: {}{}", preview, ellipsis);
+            }
+            if !resp.tool_calls.is_empty() {
+                println!("  Tool calls: {}", resp.tool_calls.len());
             }
         }
     }
