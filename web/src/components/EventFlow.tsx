@@ -81,6 +81,9 @@ function EventFlowInner({ events, followLatest }: EventFlowInnerProps) {
     const nodes: Node[] = [];
     const edges: Edge[] = [];
 
+    // Get the ID of the latest event
+    const latestEventId = events.length > 0 ? events[events.length - 1].id : null;
+
     let yOffset = 0;
     let prevNodeId: string | null = null;
     let sessionIndex = 0;
@@ -152,7 +155,7 @@ function EventFlowInner({ events, followLatest }: EventFlowInnerProps) {
           id: nodeId,
           type: 'event',
           position: { x: -NODE_WIDTH / 2, y: yOffset },
-          data: { event } as EventNodeData,
+          data: { event, isLatest: event.id === latestEventId } as EventNodeData,
           draggable: false,
         });
 
@@ -232,7 +235,7 @@ function EventFlowInner({ events, followLatest }: EventFlowInnerProps) {
             position: { x: TOPIC_PADDING, y: topicYOffset },
             parentId: topicGroupId,
             extent: 'parent',
-            data: { event } as EventNodeData,
+            data: { event, isLatest: event.id === latestEventId } as EventNodeData,
             draggable: false,
           });
 

@@ -4,6 +4,7 @@ import type { ObservabilityEvent } from '../../hooks/useSSE';
 
 export interface EventNodeData extends Record<string, unknown> {
   event: ObservabilityEvent;
+  isLatest?: boolean;
 }
 
 function truncate(text: string, maxLen: number): string {
@@ -16,7 +17,7 @@ interface EventNodeProps {
 }
 
 function EventNodeComponent({ data }: EventNodeProps) {
-  const { event } = data;
+  const { event, isLatest } = data;
   const payload = event.payload;
   const isUserMessage = payload.type === 'user_message';
   const arrow = isUserMessage ? '→' : '←';
@@ -26,6 +27,23 @@ function EventNodeComponent({ data }: EventNodeProps) {
   const agent = event.agent;
   const model = payload.model;
   const usage = payload.type === 'assistant_response' ? payload.usage : null;
+
+  // Detect "awaiting input" state: latest response with pending tool calls
+  const isAwaitingInput =
+    isLatest &&
+    payload.type === 'assistant_response' &&
+    payload.tool_calls.length > 0;
+
+  // Debug logging
+  if (isLatest && payload.type === 'assistant_response') {
+    console.log('Latest response:', {
+      isLatest,
+      stop_reason: payload.stop_reason,
+      tool_calls_count: payload.tool_calls.length,
+      tool_calls: payload.tool_calls,
+      isAwaitingInput
+    });
+  }
 
   let summary = '';
   if (payload.type === 'user_message') {
@@ -58,6 +76,21 @@ function EventNodeComponent({ data }: EventNodeProps) {
           <span style={{ color: '#888' }}>{time}</span>
           <span style={{ color, fontWeight: 'bold' }}>{arrow}</span>
           <span style={{ color }}>{isUserMessage ? 'request' : 'response'}</span>
+          {isAwaitingInput && (
+            <span
+              className="awaiting-input-badge"
+              style={{
+                color: '#fbbf24',
+                backgroundColor: 'rgba(251, 191, 36, 0.15)',
+                padding: '1px 6px',
+                borderRadius: '4px',
+                fontSize: '11px',
+                fontWeight: 'bold',
+              }}
+            >
+              awaiting input
+            </span>
+          )}
           {agent && (
             <span
               style={{
