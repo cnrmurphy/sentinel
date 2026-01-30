@@ -49,14 +49,37 @@ interface SSeMessageEnvelope {
     | { events_dropped: number; latest_seq: number };
 }
 
-export function useSSE(url: string) {
-  const [events, setEvents] = useState<ObservabilityEvent[]>([]);
+export function useSSE(url: string, initialEvents?: ObservabilityEvent[]) {
+  const [events, setEvents] = useState<ObservabilityEvent[]>(
+    initialEvents ?? []
+  );
+  const [seenIds] = useState<Set<string>>(() => {
+    const ids = new Set<string>();
+    if (initialEvents) {
+      for (const event of initialEvents) {
+        ids.add(event.id);
+      }
+    }
+    return ids;
+  });
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const clearEvents = useCallback(() => {
     setEvents([]);
-  }, []);
+    seenIds.clear();
+  }, [seenIds]);
+
+  // Seed with initial events when they change
+  useEffect(() => {
+    if (initialEvents && initialEvents.length > 0) {
+      setEvents(initialEvents);
+      seenIds.clear();
+      for (const event of initialEvents) {
+        seenIds.add(event.id);
+      }
+    }
+  }, [initialEvents, seenIds]);
 
   useEffect(() => {
     const eventSource = new EventSource(url);
@@ -77,6 +100,11 @@ export function useSSE(url: string) {
 
         if (envelope.type === 'observability_event') {
           const { event } = envelope.payload as { event: ObservabilityEvent };
+          // Deduplicate: skip if we've already seen this event
+          if (seenIds.has(event.id)) {
+            return;
+          }
+          seenIds.add(event.id);
           setEvents((prev) => [...prev, event]);
         } else if (envelope.type === 'resync_required') {
           console.warn('Events dropped, resync required:', envelope.payload);
@@ -91,7 +119,7 @@ export function useSSE(url: string) {
     return () => {
       eventSource.close();
     };
-  }, [url]);
+  }, [url, seenIds]);
 
   return { events, connected, error, clearEvents };
 }
