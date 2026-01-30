@@ -11,6 +11,7 @@ export function EventList({ agentName }: EventListProps) {
   const [initialEvents, setInitialEvents] = useState<
     ObservabilityEvent[] | undefined
   >(undefined);
+  const [followLatest, setFollowLatest] = useState(true);
 
   // Fetch historical events when viewing an agent's event log
   useEffect(() => {
@@ -78,6 +79,20 @@ export function EventList({ agentName }: EventListProps) {
             {connected ? '● Connected' : '○ Disconnected'}
           </span>
           <button
+            onClick={() => setFollowLatest(!followLatest)}
+            style={{
+              padding: '4px 12px',
+              backgroundColor: followLatest ? '#4ade80' : '#333',
+              color: followLatest ? '#000' : '#fff',
+              border: 'none',
+              borderRadius: '4px',
+              cursor: 'pointer',
+              fontSize: '12px',
+            }}
+          >
+            {followLatest ? 'Following' : 'Follow'}
+          </button>
+          <button
             onClick={clearEvents}
             style={{
               padding: '4px 12px',
@@ -111,7 +126,7 @@ export function EventList({ agentName }: EventListProps) {
             Waiting for events...
           </div>
         ) : (
-          <EventFlow events={events} />
+          <EventFlow events={events} followLatest={followLatest} />
         )}
       </div>
     </div>

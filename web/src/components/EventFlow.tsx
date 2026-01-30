@@ -1,4 +1,4 @@
-import { useMemo, useState, useCallback } from 'react';
+import { useMemo, useState, useCallback, useEffect, useRef } from 'react';
 import {
   ReactFlow,
   Background,
@@ -26,11 +26,13 @@ const SESSION_GAP = 60;
 
 interface EventFlowInnerProps {
   events: ObservabilityEvent[];
+  followLatest: boolean;
 }
 
-function EventFlowInner({ events }: EventFlowInnerProps) {
+function EventFlowInner({ events, followLatest }: EventFlowInnerProps) {
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
-  const { flowToScreenPosition } = useReactFlow();
+  const { flowToScreenPosition, setCenter } = useReactFlow();
+  const prevEventCountRef = useRef(events.length);
 
   // Group events by session_id
   const groupedEvents = useMemo(() => {
@@ -123,6 +125,28 @@ function EventFlowInner({ events }: EventFlowInnerProps) {
     return { nodes, edges };
   }, [groupedEvents, selectedEventId]);
 
+  // Auto-pan to latest event when followLatest is enabled
+  useEffect(() => {
+    if (!followLatest || events.length === 0) return;
+
+    // Only pan when new events are added
+    if (events.length <= prevEventCountRef.current) {
+      prevEventCountRef.current = events.length;
+      return;
+    }
+    prevEventCountRef.current = events.length;
+
+    const lastEvent = events[events.length - 1];
+    const lastNode = nodes.find((n) => n.id === lastEvent.id);
+    if (lastNode) {
+      setCenter(
+        lastNode.position.x + NODE_WIDTH / 2,
+        lastNode.position.y + NODE_HEIGHT / 2,
+        { duration: 300, zoom: 1 }
+      );
+    }
+  }, [events, nodes, followLatest, setCenter]);
+
   const selectedEvent = useMemo(() => {
     if (!selectedEventId) return null;
     return events.find((e) => e.id === selectedEventId) ?? null;
@@ -188,12 +212,13 @@ function EventFlowInner({ events }: EventFlowInnerProps) {
 
 interface EventFlowProps {
   events: ObservabilityEvent[];
+  followLatest: boolean;
 }
 
-export function EventFlow({ events }: EventFlowProps) {
+export function EventFlow({ events, followLatest }: EventFlowProps) {
   return (
     <ReactFlowProvider>
-      <EventFlowInner events={events} />
+      <EventFlowInner events={events} followLatest={followLatest} />
     </ReactFlowProvider>
   );
 }
