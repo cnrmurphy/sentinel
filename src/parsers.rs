@@ -78,8 +78,18 @@ pub struct SseMessageStart {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SseContentBlock {
     Text { text: String },
-    Thinking { thinking: String },
-    ToolUse { id: String, name: String },
+    #[serde(rename_all = "snake_case")]
+    Thinking {
+        thinking: String,
+        #[serde(default)]
+        signature: String,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        #[serde(default)]
+        input: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -173,7 +183,7 @@ impl AnthropicParser {
                     metadata.message_id = Some(message.id);
                 }
                 SseEvent::ContentBlockStart { content_block, .. } => {
-                    if let SseContentBlock::ToolUse { id, name } = content_block {
+                    if let SseContentBlock::ToolUse { id, name, .. } = content_block {
                         current_tool_id = Some(id);
                         current_tool_name = Some(name);
                         current_tool_input.clear();

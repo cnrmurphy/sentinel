@@ -3,13 +3,18 @@ import {
   ReactFlow,
   Background,
   useReactFlow,
+  useOnViewportChange,
   ReactFlowProvider,
   type Node,
   type Edge,
   type NodeMouseHandler,
   type NodeTypes,
+  type Viewport,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
+
+// Virtualization buffer - render nodes this far outside the viewport
+const VIRTUALIZATION_BUFFER = 1000;
 
 import { EventNode, type EventNodeData } from './nodes/EventNode';
 import { EventDetailPanel } from './EventDetailPanel';
@@ -56,8 +61,53 @@ interface EventFlowInnerProps {
 
 function EventFlowInner({ events, followLatest }: EventFlowInnerProps) {
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
+  const [viewport, setViewport] = useState<Viewport>({ x: 0, y: 0, zoom: 1 });
+  const [containerHeight, setContainerHeight] = useState(800);
+  const containerRef = useRef<HTMLDivElement>(null);
   const { flowToScreenPosition, setCenter } = useReactFlow();
   const prevEventCountRef = useRef(events.length);
+
+  // Track viewport changes for virtualization
+  // Use onEnd to avoid constant updates during scrolling, with onChange throttled as backup
+  const lastViewportRef = useRef<Viewport>(viewport);
+  const viewportTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useOnViewportChange({
+    onChange: useCallback((vp: Viewport) => {
+      lastViewportRef.current = vp;
+      // Throttled update during scroll for responsiveness
+      if (viewportTimeoutRef.current) return;
+      viewportTimeoutRef.current = setTimeout(() => {
+        setViewport(lastViewportRef.current);
+        viewportTimeoutRef.current = null;
+      }, 100);
+    }, []),
+    onEnd: useCallback((vp: Viewport) => {
+      // Immediate update when scrolling stops
+      if (viewportTimeoutRef.current) {
+        clearTimeout(viewportTimeoutRef.current);
+        viewportTimeoutRef.current = null;
+      }
+      setViewport(vp);
+    }, []),
+  });
+
+  // Track container size
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const resizeObserver = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        setContainerHeight(entry.contentRect.height);
+      }
+    });
+
+    resizeObserver.observe(container);
+    setContainerHeight(container.clientHeight);
+
+    return () => resizeObserver.disconnect();
+  }, []);
 
   // Group events by session_id, then by topic within each session
   const groupedEvents = useMemo(() => {
@@ -77,9 +127,39 @@ function EventFlowInner({ events, followLatest }: EventFlowInnerProps) {
   }, [events]);
 
   // Build nodes and edges
-  const { nodes, edges } = useMemo(() => {
+  const { nodes, edges, totalHeight } = useMemo(() => {
     const nodes: Node[] = [];
     const edges: Edge[] = [];
+
+    // Find assistant_response with tool_calls that comes after the most recent user_message
+    // in the same session (to filter out internal system noise)
+    let awaitingInputEventId: string | null = null;
+
+    // First, find the most recent user_message and its session
+    let lastUserMessageSession: string | null = null;
+    let lastUserMessageIndex = -1;
+    for (let i = events.length - 1; i >= 0; i--) {
+      if (events[i].payload.type === 'user_message' && events[i].session_id) {
+        lastUserMessageSession = events[i].session_id;
+        lastUserMessageIndex = i;
+        break;
+      }
+    }
+
+    // Now find tool_calls AFTER that user_message in the same session
+    if (lastUserMessageSession && lastUserMessageIndex >= 0) {
+      for (let i = events.length - 1; i > lastUserMessageIndex; i--) {
+        const event = events[i];
+        if (
+          event.session_id === lastUserMessageSession &&
+          event.payload.type === 'assistant_response' &&
+          event.payload.tool_calls.length > 0
+        ) {
+          awaitingInputEventId = event.id;
+          break;
+        }
+      }
+    }
 
     let yOffset = 0;
     let prevNodeId: string | null = null;
@@ -152,7 +232,7 @@ function EventFlowInner({ events, followLatest }: EventFlowInnerProps) {
           id: nodeId,
           type: 'event',
           position: { x: -NODE_WIDTH / 2, y: yOffset },
-          data: { event } as EventNodeData,
+          data: { event, isLatest: event.id === awaitingInputEventId } as EventNodeData,
           draggable: false,
         });
 
@@ -232,7 +312,7 @@ function EventFlowInner({ events, followLatest }: EventFlowInnerProps) {
             position: { x: TOPIC_PADDING, y: topicYOffset },
             parentId: topicGroupId,
             extent: 'parent',
-            data: { event } as EventNodeData,
+            data: { event, isLatest: event.id === awaitingInputEventId } as EventNodeData,
             draggable: false,
           });
 
@@ -258,8 +338,54 @@ function EventFlowInner({ events, followLatest }: EventFlowInnerProps) {
       prevNodeId = null;
     }
 
-    return { nodes, edges };
-  }, [groupedEvents]);
+    return { nodes, edges, totalHeight: yOffset };
+  }, [groupedEvents, events]);
+
+  // Filter nodes and edges to only visible ones (virtualization)
+  const { visibleNodes, visibleEdges } = useMemo(() => {
+    const zoom = viewport.zoom || 1;
+    // viewport.y is negative when scrolled down
+    const visibleTop = -viewport.y / zoom - VIRTUALIZATION_BUFFER;
+    const visibleBottom = -viewport.y / zoom + containerHeight / zoom + VIRTUALIZATION_BUFFER;
+
+    // Helper to get node's absolute Y position
+    const getNodeY = (node: Node): number => {
+      let y = node.position.y;
+      if (node.parentId) {
+        const parent = nodes.find((n) => n.id === node.parentId);
+        if (parent) y += parent.position.y;
+      }
+      return y;
+    };
+
+    // Build set of visible node IDs (including parents of visible nodes)
+    const visibleNodeIds = new Set<string>();
+    for (const node of nodes) {
+      const y = getNodeY(node);
+      const nodeHeight = node.type === 'group'
+        ? (node.style?.height as number) || NODE_HEIGHT
+        : NODE_HEIGHT;
+
+      // Node is visible if any part of it is in the visible range
+      const isVisible = y + nodeHeight >= visibleTop && y <= visibleBottom;
+
+      if (isVisible) {
+        visibleNodeIds.add(node.id);
+        // Also include parent groups if any child is visible
+        if (node.parentId) visibleNodeIds.add(node.parentId);
+      }
+    }
+
+    // Filter to only visible nodes (including parents)
+    const visibleNodes = nodes.filter((node) => visibleNodeIds.has(node.id));
+
+    // Filter edges - include if both ends are visible
+    const visibleEdges = edges.filter(
+      (edge) => visibleNodeIds.has(edge.source) && visibleNodeIds.has(edge.target)
+    );
+
+    return { visibleNodes, visibleEdges };
+  }, [nodes, edges, viewport, containerHeight]);
 
   // Helper to get absolute position (accounting for parent nodes)
   const getAbsolutePosition = useCallback((node: Node) => {
@@ -331,11 +457,25 @@ function EventFlowInner({ events, followLatest }: EventFlowInnerProps) {
     setSelectedEventId(null);
   }, []);
 
+  // Add a placeholder node at the bottom to maintain scroll extent
+  const nodesWithPlaceholder = useMemo(() => {
+    const placeholder: Node = {
+      id: '__scroll-extent__',
+      type: 'default',
+      position: { x: 0, y: totalHeight },
+      data: { label: '' },
+      style: { visibility: 'hidden', width: 1, height: 1 },
+      selectable: false,
+      draggable: false,
+    };
+    return [...visibleNodes, placeholder];
+  }, [visibleNodes, totalHeight]);
+
   return (
-    <div style={{ width: '100%', height: '100%', position: 'relative' }}>
+    <div ref={containerRef} style={{ width: '100%', height: '100%', position: 'relative' }}>
       <ReactFlow
-        nodes={nodes}
-        edges={edges}
+        nodes={nodesWithPlaceholder}
+        edges={visibleEdges}
         nodeTypes={nodeTypes}
         onNodeClick={handleNodeClick}
         onPaneClick={handlePaneClick}
