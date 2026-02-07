@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::agent::AgentStore;
+use crate::agent::{Agent, AgentStore};
 use crate::event::{ObservabilityEvent, Payload, UserMessage};
 use crate::parsers::{AnthropicRequest, ResponseParser};
 use crate::storage::Storage;
@@ -51,13 +51,13 @@ pub async fn proxy_handler(
     let working_dir = extract_working_directory(&request);
 
     // Track agent if we have a Claude session_id
-    let agent_name = if let Some(ref session_id) = claude_session_id {
+    let agent = if let Some(ref session_id) = claude_session_id {
         match state
             .agent_store
             .get_or_create_agent(session_id, working_dir.as_deref())
             .await
         {
-            Ok(agent) => Some(agent.name),
+            Ok(agent) => Some(agent),
             Err(e) => {
                 warn!("Failed to track agent: {}", e);
                 None
@@ -66,6 +66,7 @@ pub async fn proxy_handler(
     } else {
         None
     };
+    let agent_name = agent.as_ref().map(|a| a.name.clone());
 
     // Skip telemetry events - they're just metadata noise
     let is_telemetry = uri.path().contains("event_logging");
@@ -80,6 +81,7 @@ pub async fn proxy_handler(
                     timestamp: chrono::Utc::now(),
                     session_id: claude_session_id.clone(),
                     agent: agent_name.clone(),
+                    topic: agent.as_ref().and_then(|a| a.topic.clone()),
                     payload: Payload::UserMessage(UserMessage {
                         model: Some(req.model.clone()),
                         text,
@@ -144,9 +146,9 @@ pub async fn proxy_handler(
     let is_streaming = content_type.contains("text/event-stream");
 
     if is_streaming {
-        handle_streaming_response(state, response, status, response_headers, is_telemetry, claude_session_id, agent_name).await
+        handle_streaming_response(state, response, status, response_headers, is_telemetry, claude_session_id, agent_name, agent).await
     } else {
-        handle_regular_response(state, response, status, response_headers, is_telemetry, claude_session_id, agent_name).await
+        handle_regular_response(state, response, status, response_headers, is_telemetry, claude_session_id, agent_name, agent).await
     }
 }
 
@@ -158,12 +160,14 @@ async fn handle_streaming_response(
     is_telemetry: bool,
     claude_session_id: Option<String>,
     agent_name: Option<String>,
+    agent: Option<Agent>,
 ) -> Result<Response<Body>, StatusCode> {
     let mut stream = response.bytes_stream();
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(32);
 
     let storage = state.storage.clone();
     let parser = state.parser.clone();
+    let agent_store = state.agent_store.clone();
     let event_broadcaster = state.event_broadcaster.clone();
 
     // Spawn task to collect and forward chunks
@@ -210,12 +214,15 @@ async fn handle_streaming_response(
             }
         });
 
+        let topic = resolve_event_topic(&parsed.topic, &agent, &agent_store).await;
+
         let response_event = ObservabilityEvent {
             seq: None,
             id: Uuid::new_v4(),
             timestamp: chrono::Utc::now(),
             session_id: claude_session_id,
             agent: agent_name,
+            topic,
             payload: Payload::AssistantResponse(parsed.into()),
         };
 
@@ -255,6 +262,7 @@ async fn handle_regular_response(
     is_telemetry: bool,
     claude_session_id: Option<String>,
     agent_name: Option<String>,
+    agent: Option<Agent>,
 ) -> Result<Response<Body>, StatusCode> {
     let response_bytes = match response.bytes().await {
         Ok(bytes) => bytes,
@@ -278,12 +286,15 @@ async fn handle_regular_response(
 
         // Store and broadcast response event if parsed
         if let Some(parsed) = parsed {
+            let topic = resolve_event_topic(&parsed.topic, &agent, &state.agent_store).await;
+
             let response_event = ObservabilityEvent {
                 seq: None,
                 id: Uuid::new_v4(),
                 timestamp: chrono::Utc::now(),
                 session_id: claude_session_id,
                 agent: agent_name,
+                topic,
                 payload: Payload::AssistantResponse(parsed.into()),
             };
 
@@ -307,6 +318,23 @@ async fn handle_regular_response(
         warn!("Failed to build response: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })
+}
+
+async fn resolve_event_topic(
+    parsed_topic: &Option<String>,
+    agent: &Option<Agent>,
+    agent_store: &AgentStore,
+) -> Option<String> {
+    if let Some(new_topic) = parsed_topic {
+        if let Some(ref agent) = agent {
+            if let Err(e) = agent_store.update_topic(&agent.id, new_topic).await {
+                tracing::error!("Failed to update agent topic: {}", e);
+            }
+        }
+        Some(new_topic.clone())
+    } else {
+        agent.as_ref().and_then(|a| a.topic.clone())
+    }
 }
 
 fn extract_working_directory(request: &Option<AnthropicRequest>) -> Option<String> {

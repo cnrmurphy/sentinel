@@ -21,11 +21,6 @@ pub struct Agent {
     pub topic: Option<String>,
 }
 
-impl Agent {
-    pub fn set_topic(&mut self, topic: String) {
-        self.topic = Some(topic);
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -89,6 +84,7 @@ impl AgentStore {
                 name TEXT NOT NULL UNIQUE,
                 session_id TEXT NOT NULL,
                 working_directory TEXT,
+                topic TEXT,
                 created_at TEXT NOT NULL,
                 last_seen_at TEXT NOT NULL,
                 status TEXT NOT NULL
@@ -113,6 +109,14 @@ impl AgentStore {
         )
         .execute(&self.pool)
         .await?;
+
+        // Migration: add topic column if missing (existing databases)
+        sqlx::query(
+            r#"ALTER TABLE agents ADD COLUMN topic TEXT"#,
+        )
+        .execute(&self.pool)
+        .await
+        .ok();
 
         Ok(())
     }
@@ -157,7 +161,7 @@ impl AgentStore {
             created_at: now,
             last_seen_at: now,
             status: AgentStatus::Active,
-            topic: Some(String::from("")),
+            topic: None,
         };
 
         self.insert(&agent).await?;
@@ -174,14 +178,15 @@ impl AgentStore {
     async fn insert(&self, agent: &Agent) -> Result<(), sqlx::Error> {
         sqlx::query(
             r#"
-            INSERT INTO agents (id, name, session_id, working_directory, created_at, last_seen_at, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO agents (id, name, session_id, working_directory, topic, created_at, last_seen_at, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(agent.id.to_string())
         .bind(&agent.name)
         .bind(&agent.session_id)
         .bind(&agent.working_directory)
+        .bind(&agent.topic)
         .bind(agent.created_at.to_rfc3339())
         .bind(agent.last_seen_at.to_rfc3339())
         .bind(agent.status.to_string())
@@ -192,17 +197,9 @@ impl AgentStore {
     }
 
     pub async fn find_by_session_id(&self, session_id: &str) -> Result<Option<Agent>, sqlx::Error> {
-        let row: Option<(
-            String,
-            String,
-            String,
-            Option<String>,
-            String,
-            String,
-            String,
-        )> = sqlx::query_as(
+        let row: Option<AgentRow> = sqlx::query_as(
             r#"
-                SELECT id, name, session_id, working_directory, created_at, last_seen_at, status
+                SELECT id, name, session_id, working_directory, topic, created_at, last_seen_at, status
                 FROM agents
                 WHERE session_id = ?
                 "#,
@@ -215,17 +212,9 @@ impl AgentStore {
     }
 
     pub async fn find_by_name(&self, name: &str) -> Result<Option<Agent>, sqlx::Error> {
-        let row: Option<(
-            String,
-            String,
-            String,
-            Option<String>,
-            String,
-            String,
-            String,
-        )> = sqlx::query_as(
+        let row: Option<AgentRow> = sqlx::query_as(
             r#"
-                SELECT id, name, session_id, working_directory, created_at, last_seen_at, status
+                SELECT id, name, session_id, working_directory, topic, created_at, last_seen_at, status
                 FROM agents
                 WHERE name = ?
                 "#,
@@ -238,17 +227,9 @@ impl AgentStore {
     }
 
     pub async fn list_all(&self) -> Result<Vec<Agent>, sqlx::Error> {
-        let rows: Vec<(
-            String,
-            String,
-            String,
-            Option<String>,
-            String,
-            String,
-            String,
-        )> = sqlx::query_as(
+        let rows: Vec<AgentRow> = sqlx::query_as(
             r#"
-                SELECT id, name, session_id, working_directory, created_at, last_seen_at, status
+                SELECT id, name, session_id, working_directory, topic, created_at, last_seen_at, status
                 FROM agents
                 ORDER BY last_seen_at DESC
                 "#,
@@ -308,18 +289,22 @@ impl AgentStore {
         Ok(())
     }
 
-    fn row_to_agent(
-        row: (
-            String,
-            String,
-            String,
-            Option<String>,
-            String,
-            String,
-            String,
-        ),
-    ) -> Option<Agent> {
-        let (id, name, session_id, working_directory, created_at, last_seen_at, status) = row;
+    pub async fn update_topic(&self, id: &Uuid, topic: &str) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            r#"
+            UPDATE agents SET topic = ? WHERE id = ?
+            "#,
+        )
+        .bind(topic)
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    fn row_to_agent(row: AgentRow) -> Option<Agent> {
+        let (id, name, session_id, working_directory, topic, created_at, last_seen_at, status) = row;
         Some(Agent {
             id: id.parse().ok()?,
             name,
@@ -336,7 +321,18 @@ impl AgentStore {
                 "inactive" => AgentStatus::Inactive,
                 _ => return None,
             },
-            topic: Some(String::from("")),
+            topic,
         })
     }
 }
+
+type AgentRow = (
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+    String,
+    String,
+);
