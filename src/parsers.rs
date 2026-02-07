@@ -123,6 +123,20 @@ pub struct ParsedResponse {
     pub usage: Option<Usage>,
     pub streaming: bool,
     pub metadata: ResponseMetadata,
+    pub topic: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TopicInfo {
+    #[serde(rename = "isNewTopic")]
+    is_new_topic: bool,
+    title: Option<String>,
+}
+
+fn extract_topic(text: &Option<String>) -> Option<String> {
+    let text = text.as_ref()?.trim();
+    let info: TopicInfo = serde_json::from_str(text).ok()?;
+    if info.is_new_topic { info.title } else { None }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -210,13 +224,17 @@ impl AnthropicParser {
             }
         }
 
+        let text = if text.is_empty() { None } else { Some(text) };
+        let topic = extract_topic(&text);
+
         ParsedResponse {
             thinking: if thinking.is_empty() { None } else { Some(thinking) },
-            text: if text.is_empty() { None } else { Some(text) },
+            text,
             tool_calls,
             usage,
             streaming: true,
             metadata,
+            topic,
         }
     }
 }
@@ -252,6 +270,8 @@ impl ResponseParser for AnthropicParser {
             }
         }
 
+        let topic = extract_topic(&text);
+
         ParsedResponse {
             thinking,
             text,
@@ -263,6 +283,7 @@ impl ResponseParser for AnthropicParser {
                 message_id: Some(response.id),
                 stop_reason: response.stop_reason,
             },
+            topic,
         }
     }
 
@@ -321,6 +342,29 @@ data: {"type":"message_stop"}
         let parsed = parser.parse_streaming(sse);
         assert_eq!(parsed.text, Some("Hello world".to_string()));
         assert!(parsed.streaming);
+    }
+
+    #[test]
+    fn test_extract_topic_new() {
+        let text = Some(r#"{"isNewTopic": true, "title": "Fix auth bug"}"#.to_string());
+        assert_eq!(extract_topic(&text), Some("Fix auth bug".to_string()));
+    }
+
+    #[test]
+    fn test_extract_topic_not_new() {
+        let text = Some(r#"{"isNewTopic": false, "title": "Fix auth bug"}"#.to_string());
+        assert_eq!(extract_topic(&text), None);
+    }
+
+    #[test]
+    fn test_extract_topic_normal_response() {
+        let text = Some("Here's how to fix the auth bug...".to_string());
+        assert_eq!(extract_topic(&text), None);
+    }
+
+    #[test]
+    fn test_extract_topic_none() {
+        assert_eq!(extract_topic(&None), None);
     }
 
     #[test]

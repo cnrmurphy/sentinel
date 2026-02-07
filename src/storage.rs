@@ -37,6 +37,7 @@ impl Storage {
                 timestamp TEXT NOT NULL,
                 session_id TEXT,
                 agent TEXT,
+                topic TEXT,
                 payload TEXT NOT NULL
             )
             "#,
@@ -52,6 +53,14 @@ impl Storage {
         .execute(&self.pool)
         .await?;
 
+        // Migration: add topic column if missing (existing databases)
+        sqlx::query(
+            r#"ALTER TABLE observability_events ADD COLUMN topic TEXT"#,
+        )
+        .execute(&self.pool)
+        .await
+        .ok();
+
         Ok(())
     }
 
@@ -64,14 +73,15 @@ impl Storage {
 
         let result = sqlx::query(
             r#"
-            INSERT INTO observability_events (id, timestamp, session_id, agent, payload)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO observability_events (id, timestamp, session_id, agent, topic, payload)
+            VALUES (?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(event.id.to_string())
         .bind(event.timestamp.to_rfc3339())
         .bind(event.session_id.as_ref())
         .bind(event.agent.as_ref())
+        .bind(event.topic.as_ref())
         .bind(payload_json)
         .execute(&self.pool)
         .await?;
@@ -83,10 +93,10 @@ impl Storage {
         &self,
         limit: i64,
     ) -> Result<Vec<ObservabilityEvent>, sqlx::Error> {
-        let rows: Vec<(i64, String, String, Option<String>, Option<String>, String)> =
+        let rows: Vec<(i64, String, String, Option<String>, Option<String>, Option<String>, String)> =
             sqlx::query_as(
                 r#"
-                SELECT seq, id, timestamp, session_id, agent, payload
+                SELECT seq, id, timestamp, session_id, agent, topic, payload
                 FROM observability_events
                 ORDER BY seq DESC
                 LIMIT ?
@@ -98,7 +108,7 @@ impl Storage {
 
         let events = rows
             .into_iter()
-            .filter_map(|(seq, id, timestamp, session_id, agent, payload)| {
+            .filter_map(|(seq, id, timestamp, session_id, agent, topic, payload)| {
                 Some(ObservabilityEvent {
                     seq: Some(seq),
                     id: id.parse().ok()?,
@@ -107,6 +117,7 @@ impl Storage {
                         .with_timezone(&Utc),
                     session_id,
                     agent,
+                    topic,
                     payload: serde_json::from_str(&payload).ok()?,
                 })
             })
@@ -120,10 +131,10 @@ impl Storage {
         agent: &str,
         limit: i64,
     ) -> Result<Vec<ObservabilityEvent>, sqlx::Error> {
-        let rows: Vec<(i64, String, String, Option<String>, Option<String>, String)> =
+        let rows: Vec<(i64, String, String, Option<String>, Option<String>, Option<String>, String)> =
             sqlx::query_as(
                 r#"
-                SELECT seq, id, timestamp, session_id, agent, payload
+                SELECT seq, id, timestamp, session_id, agent, topic, payload
                 FROM observability_events
                 WHERE agent = ?
                 ORDER BY seq ASC
@@ -137,7 +148,7 @@ impl Storage {
 
         let events = rows
             .into_iter()
-            .filter_map(|(seq, id, timestamp, session_id, agent, payload)| {
+            .filter_map(|(seq, id, timestamp, session_id, agent, topic, payload)| {
                 Some(ObservabilityEvent {
                     seq: Some(seq),
                     id: id.parse().ok()?,
@@ -146,6 +157,7 @@ impl Storage {
                         .with_timezone(&Utc),
                     session_id,
                     agent,
+                    topic,
                     payload: serde_json::from_str(&payload).ok()?,
                 })
             })

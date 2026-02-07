@@ -31,29 +31,6 @@ const SESSION_GAP = 60;
 const TOPIC_PADDING = 16;
 const TOPIC_HEADER_HEIGHT = 32;
 
-interface TopicInfo {
-  isNewTopic: boolean;
-  title: string | null;
-}
-
-function extractTopicInfo(text: string | null): TopicInfo | null {
-  if (!text) return null;
-
-  // Look for JSON pattern in the text
-  const match = text.match(/\{"isNewTopic"\s*:\s*(true|false)\s*,\s*"title"\s*:\s*(".*?"|null)\}/);
-  if (!match) return null;
-
-  try {
-    const parsed = JSON.parse(match[0]);
-    return {
-      isNewTopic: parsed.isNewTopic === true,
-      title: parsed.title,
-    };
-  } catch {
-    return null;
-  }
-}
-
 interface EventFlowInnerProps {
   events: ObservabilityEvent[];
   followLatest: boolean;
@@ -200,25 +177,22 @@ function EventFlowInner({ events, followLatest }: EventFlowInnerProps) {
       }
       const topicGroups: TopicGroup[] = [];
       const ungroupedEvents: ObservabilityEvent[] = [];
-      let currentTopic: TopicGroup | null = null;
+      const topicMap = new Map<string, TopicGroup>();
 
       for (const event of sessionEvents) {
-        // Check if this event starts a new topic
-        if (event.payload.type === 'assistant_response') {
-          const topicInfo = extractTopicInfo(event.payload.text);
-          if (topicInfo?.isNewTopic && topicInfo.title) {
-            // Start a new topic group
-            currentTopic = {
+        const topic = event.topic;
+        if (topic) {
+          let group = topicMap.get(topic);
+          if (!group) {
+            group = {
               id: `topic-${sessionId}-${topicGroups.length}`,
-              title: topicInfo.title,
+              title: topic,
               events: [],
             };
-            topicGroups.push(currentTopic);
+            topicMap.set(topic, group);
+            topicGroups.push(group);
           }
-        }
-
-        if (currentTopic) {
-          currentTopic.events.push(event);
+          group.events.push(event);
         } else {
           ungroupedEvents.push(event);
         }

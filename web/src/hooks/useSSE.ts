@@ -39,6 +39,7 @@ export interface ObservabilityEvent {
   timestamp: string;
   session_id: string | null;
   agent: string | null;
+  topic: string | null;
   payload: Payload;
 }
 
