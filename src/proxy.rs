@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use crate::agent::{Agent, AgentStore};
 use crate::event::{ObservabilityEvent, Payload, UserMessage};
-use crate::parsers::{AnthropicRequest, ResponseParser};
+use crate::parsers::{AnthropicRequest, ParsedResponse, ResponseParser};
 use crate::storage::Storage;
 
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com";
@@ -214,23 +214,10 @@ async fn handle_streaming_response(
             }
         });
 
-        let topic = resolve_event_topic(&parsed.topic, &agent, &agent_store).await;
-
-        let response_event = ObservabilityEvent {
-            seq: None,
-            id: Uuid::new_v4(),
-            timestamp: chrono::Utc::now(),
-            session_id: claude_session_id,
-            agent: agent_name,
-            topic,
-            payload: Payload::AssistantResponse(parsed.into()),
-        };
-
-        if let Err(e) = storage.insert_observability_event(&response_event).await {
-            tracing::error!("Failed to store response event: {}", e);
-        }
-
-        let _ = event_broadcaster.send(response_event);
+        store_and_broadcast_response_event(
+            parsed, &agent, &agent_store, &storage, &event_broadcaster,
+            claude_session_id, agent_name,
+        ).await;
 
         info!(
             "← Streaming response complete ({} bytes) text={:?}",
@@ -284,25 +271,11 @@ async fn handle_regular_response(
                 None
             };
 
-        // Store and broadcast response event if parsed
         if let Some(parsed) = parsed {
-            let topic = resolve_event_topic(&parsed.topic, &agent, &state.agent_store).await;
-
-            let response_event = ObservabilityEvent {
-                seq: None,
-                id: Uuid::new_v4(),
-                timestamp: chrono::Utc::now(),
-                session_id: claude_session_id,
-                agent: agent_name,
-                topic,
-                payload: Payload::AssistantResponse(parsed.into()),
-            };
-
-            if let Err(e) = state.storage.insert_observability_event(&response_event).await {
-                tracing::error!("Failed to store response event: {}", e);
-            }
-
-            let _ = state.event_broadcaster.send(response_event);
+            store_and_broadcast_response_event(
+                parsed, &agent, &state.agent_store, &state.storage, &state.event_broadcaster,
+                claude_session_id, agent_name,
+            ).await;
         }
 
         info!("← {} ({} bytes)", status, response_bytes.len());
@@ -320,12 +293,19 @@ async fn handle_regular_response(
     })
 }
 
-async fn resolve_event_topic(
-    parsed_topic: &Option<String>,
+async fn store_and_broadcast_response_event(
+    parsed: ParsedResponse,
     agent: &Option<Agent>,
     agent_store: &AgentStore,
-) -> Option<String> {
-    if let Some(new_topic) = parsed_topic {
+    storage: &Storage,
+    event_broadcaster: &tokio::sync::broadcast::Sender<ObservabilityEvent>,
+    session_id: Option<String>,
+    agent_name: Option<String>,
+) {
+    let is_topic_event = parsed.topic.is_some();
+
+    // Resolve topic: update agent if new, otherwise use agent's current topic
+    let topic = if let Some(new_topic) = &parsed.topic {
         if let Some(ref agent) = agent {
             if let Err(e) = agent_store.update_topic(&agent.id, new_topic).await {
                 tracing::error!("Failed to update agent topic: {}", e);
@@ -334,7 +314,27 @@ async fn resolve_event_topic(
         Some(new_topic.clone())
     } else {
         agent.as_ref().and_then(|a| a.topic.clone())
+    };
+
+    if is_topic_event {
+        return;
     }
+
+    let event = ObservabilityEvent {
+        seq: None,
+        id: Uuid::new_v4(),
+        timestamp: chrono::Utc::now(),
+        session_id,
+        agent: agent_name,
+        topic,
+        payload: Payload::AssistantResponse(parsed.into()),
+    };
+
+    if let Err(e) = storage.insert_observability_event(&event).await {
+        tracing::error!("Failed to store response event: {}", e);
+    }
+
+    let _ = event_broadcaster.send(event);
 }
 
 fn extract_working_directory(request: &Option<AnthropicRequest>) -> Option<String> {
