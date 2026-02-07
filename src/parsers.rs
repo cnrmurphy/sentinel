@@ -123,6 +123,7 @@ pub struct ParsedResponse {
     pub usage: Option<Usage>,
     pub streaming: bool,
     pub metadata: ResponseMetadata,
+    pub is_topic_event: bool,
     pub topic: Option<String>,
 }
 
@@ -133,10 +134,11 @@ struct TopicInfo {
     title: Option<String>,
 }
 
-fn extract_topic(text: &Option<String>) -> Option<String> {
-    let text = text.as_ref()?.trim();
-    let info: TopicInfo = serde_json::from_str(text).ok()?;
-    if info.is_new_topic { info.title } else { None }
+fn parse_topic(text: &Option<String>) -> (bool, Option<String>) {
+    let Some(text) = text.as_ref() else { return (false, None) };
+    let Ok(info) = serde_json::from_str::<TopicInfo>(text.trim()) else { return (false, None) };
+    let title = if info.is_new_topic { info.title } else { None };
+    (true, title)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -225,7 +227,7 @@ impl AnthropicParser {
         }
 
         let text = if text.is_empty() { None } else { Some(text) };
-        let topic = extract_topic(&text);
+        let (is_topic_event, topic) = parse_topic(&text);
 
         ParsedResponse {
             thinking: if thinking.is_empty() { None } else { Some(thinking) },
@@ -234,6 +236,7 @@ impl AnthropicParser {
             usage,
             streaming: true,
             metadata,
+            is_topic_event,
             topic,
         }
     }
@@ -270,7 +273,7 @@ impl ResponseParser for AnthropicParser {
             }
         }
 
-        let topic = extract_topic(&text);
+        let (is_topic_event, topic) = parse_topic(&text);
 
         ParsedResponse {
             thinking,
@@ -278,6 +281,7 @@ impl ResponseParser for AnthropicParser {
             tool_calls,
             usage: response.usage,
             streaming: false,
+            is_topic_event,
             metadata: ResponseMetadata {
                 model: Some(response.model),
                 message_id: Some(response.id),
@@ -345,26 +349,34 @@ data: {"type":"message_stop"}
     }
 
     #[test]
-    fn test_extract_topic_new() {
+    fn test_parse_topic_new() {
         let text = Some(r#"{"isNewTopic": true, "title": "Fix auth bug"}"#.to_string());
-        assert_eq!(extract_topic(&text), Some("Fix auth bug".to_string()));
+        let (is_topic, title) = parse_topic(&text);
+        assert!(is_topic);
+        assert_eq!(title, Some("Fix auth bug".to_string()));
     }
 
     #[test]
-    fn test_extract_topic_not_new() {
-        let text = Some(r#"{"isNewTopic": false, "title": "Fix auth bug"}"#.to_string());
-        assert_eq!(extract_topic(&text), None);
+    fn test_parse_topic_not_new() {
+        let text = Some(r#"{"isNewTopic": false, "title": null}"#.to_string());
+        let (is_topic, title) = parse_topic(&text);
+        assert!(is_topic);
+        assert_eq!(title, None);
     }
 
     #[test]
-    fn test_extract_topic_normal_response() {
+    fn test_parse_topic_normal_response() {
         let text = Some("Here's how to fix the auth bug...".to_string());
-        assert_eq!(extract_topic(&text), None);
+        let (is_topic, title) = parse_topic(&text);
+        assert!(!is_topic);
+        assert_eq!(title, None);
     }
 
     #[test]
-    fn test_extract_topic_none() {
-        assert_eq!(extract_topic(&None), None);
+    fn test_parse_topic_none() {
+        let (is_topic, title) = parse_topic(&None);
+        assert!(!is_topic);
+        assert_eq!(title, None);
     }
 
     #[test]

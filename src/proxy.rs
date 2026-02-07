@@ -302,8 +302,6 @@ async fn store_and_broadcast_response_event(
     session_id: Option<String>,
     agent_name: Option<String>,
 ) {
-    let is_topic_event = parsed.topic.is_some();
-
     // Resolve topic: update agent if new, otherwise use agent's current topic
     let topic = if let Some(new_topic) = &parsed.topic {
         if let Some(ref agent) = agent {
@@ -316,7 +314,7 @@ async fn store_and_broadcast_response_event(
         agent.as_ref().and_then(|a| a.topic.clone())
     };
 
-    if is_topic_event {
+    if parsed.is_topic_event {
         return;
     }
 
