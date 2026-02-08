@@ -11,6 +11,7 @@ pub struct ObservabilityEvent {
     pub timestamp: DateTime<Utc>,
     pub session_id: Option<String>,
     pub agent: Option<String>,
+    pub topic: Option<String>,
     pub payload: Payload,
 }
 
