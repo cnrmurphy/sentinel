@@ -30,6 +30,7 @@ const NODE_GAP = 20;
 const SESSION_GAP = 60;
 const TOPIC_PADDING = 16;
 const TOPIC_HEADER_HEIGHT = 32;
+const COLLAPSED_TOPIC_HEIGHT = TOPIC_HEADER_HEIGHT + TOPIC_PADDING;
 
 interface EventFlowInnerProps {
   events: ObservabilityEvent[];
@@ -38,6 +39,7 @@ interface EventFlowInnerProps {
 
 function EventFlowInner({ events, followLatest }: EventFlowInnerProps) {
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
+  const [collapsedTopics, setCollapsedTopics] = useState<Set<string>>(new Set());
   const [viewport, setViewport] = useState<Viewport>({ x: 0, y: 0, zoom: 1 });
   const [containerHeight, setContainerHeight] = useState(800);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -102,6 +104,29 @@ function EventFlowInner({ events, followLatest }: EventFlowInnerProps) {
 
     return sessions;
   }, [events]);
+
+  // Collect all topic group IDs in order for auto-collapse logic
+  const topicGroupIds = useMemo(() => {
+    const ids: string[] = [];
+    for (const [sessionId, sessionEvents] of groupedEvents) {
+      const seen = new Set<string>();
+      let topicIndex = 0;
+      for (const event of sessionEvents) {
+        if (event.topic && !seen.has(event.topic)) {
+          seen.add(event.topic);
+          ids.push(`topic-${sessionId}-${topicIndex}`);
+          topicIndex++;
+        }
+      }
+    }
+    return ids;
+  }, [groupedEvents]);
+
+  // Auto-collapse all topics except the last when topics change
+  useEffect(() => {
+    if (topicGroupIds.length === 0) return;
+    setCollapsedTopics(new Set(topicGroupIds.slice(0, -1)));
+  }, [topicGroupIds]);
 
   // Build nodes and edges
   const { nodes, edges, totalHeight } = useMemo(() => {
@@ -227,14 +252,22 @@ function EventFlowInner({ events, followLatest }: EventFlowInnerProps) {
 
       // Render topic groups
       for (const topic of topicGroups) {
-        const topicEventsHeight =
+        const isCollapsed = collapsedTopics.has(topic.id);
+        const topicGroupId = topic.id;
+        const topicLabelId = `${topicGroupId}-label`;
+
+        const expandedHeight =
           topic.events.length * NODE_HEIGHT +
           (topic.events.length - 1) * NODE_GAP +
           TOPIC_PADDING * 2 +
           TOPIC_HEADER_HEIGHT;
 
+        const groupHeight = isCollapsed ? COLLAPSED_TOPIC_HEIGHT : expandedHeight;
+
+        const chevron = isCollapsed ? '▶' : '▼';
+        const labelText = `${chevron} ${topic.title} (${topic.events.length})`;
+
         // Create the topic group node
-        const topicGroupId = topic.id;
         nodes.push({
           id: topicGroupId,
           type: 'group',
@@ -242,24 +275,24 @@ function EventFlowInner({ events, followLatest }: EventFlowInnerProps) {
           data: {},
           style: {
             width: NODE_WIDTH + TOPIC_PADDING * 2,
-            height: topicEventsHeight,
+            height: groupHeight,
             backgroundColor: 'rgba(99, 102, 241, 0.08)',
             border: '1px solid rgba(99, 102, 241, 0.3)',
             borderRadius: '8px',
+            overflow: isCollapsed ? 'hidden' : undefined,
           },
           selectable: false,
           draggable: false,
         });
 
         // Add topic title as a label node inside the group
-        const topicLabelId = `${topicGroupId}-label`;
         nodes.push({
           id: topicLabelId,
           type: 'default',
           position: { x: TOPIC_PADDING, y: 8 },
           parentId: topicGroupId,
           extent: 'parent',
-          data: { label: topic.title },
+          data: { label: labelText },
           style: {
             background: 'transparent',
             border: 'none',
@@ -269,43 +302,59 @@ function EventFlowInner({ events, followLatest }: EventFlowInnerProps) {
             fontWeight: 'bold',
             width: NODE_WIDTH,
             padding: 0,
+            cursor: 'pointer',
           },
-          selectable: false,
+          selectable: true,
           draggable: false,
         });
 
-        // Add events inside the topic group
-        let topicYOffset = TOPIC_HEADER_HEIGHT + TOPIC_PADDING;
-
-        for (const event of topic.events) {
-          const nodeId = event.id;
-
-          nodes.push({
-            id: nodeId,
-            type: 'event',
-            position: { x: TOPIC_PADDING, y: topicYOffset },
-            parentId: topicGroupId,
-            extent: 'parent',
-            data: { event, isLatest: event.id === awaitingInputEventId } as EventNodeData,
-            draggable: false,
-          });
-
-          if (prevNodeId && !prevNodeId.startsWith('topic-') && !prevNodeId.endsWith('-label')) {
+        if (isCollapsed) {
+          // When collapsed, connect edge from previous node to the label
+          if (prevNodeId && !prevNodeId.startsWith('topic-')) {
             edges.push({
-              id: `edge-${prevNodeId}-${nodeId}`,
+              id: `edge-${prevNodeId}-${topicLabelId}`,
               source: prevNodeId,
-              target: nodeId,
+              target: topicLabelId,
               type: 'smoothstep',
               style: { stroke: '#444', strokeWidth: 2 },
               animated: false,
             });
           }
+          prevNodeId = topicLabelId;
+        } else {
+          // Add events inside the topic group
+          let topicYOffset = TOPIC_HEADER_HEIGHT + TOPIC_PADDING;
 
-          prevNodeId = nodeId;
-          topicYOffset += NODE_HEIGHT + NODE_GAP;
+          for (const event of topic.events) {
+            const nodeId = event.id;
+
+            nodes.push({
+              id: nodeId,
+              type: 'event',
+              position: { x: TOPIC_PADDING, y: topicYOffset },
+              parentId: topicGroupId,
+              extent: 'parent',
+              data: { event, isLatest: event.id === awaitingInputEventId } as EventNodeData,
+              draggable: false,
+            });
+
+            if (prevNodeId && !prevNodeId.startsWith('topic-')) {
+              edges.push({
+                id: `edge-${prevNodeId}-${nodeId}`,
+                source: prevNodeId,
+                target: nodeId,
+                type: 'smoothstep',
+                style: { stroke: '#444', strokeWidth: 2 },
+                animated: false,
+              });
+            }
+
+            prevNodeId = nodeId;
+            topicYOffset += NODE_HEIGHT + NODE_GAP;
+          }
         }
 
-        yOffset += topicEventsHeight + NODE_GAP;
+        yOffset += groupHeight + NODE_GAP;
       }
 
       sessionIndex++;
@@ -313,7 +362,7 @@ function EventFlowInner({ events, followLatest }: EventFlowInnerProps) {
     }
 
     return { nodes, edges, totalHeight: yOffset };
-  }, [groupedEvents, events]);
+  }, [groupedEvents, events, collapsedTopics]);
 
   // Filter nodes and edges to only visible ones (virtualization)
   const { visibleNodes, visibleEdges } = useMemo(() => {
@@ -424,6 +473,17 @@ function EventFlowInner({ events, followLatest }: EventFlowInnerProps) {
   const handleNodeClick: NodeMouseHandler = useCallback((_event, node) => {
     if (node.type === 'event') {
       setSelectedEventId((prev) => (prev === node.id ? null : node.id));
+    } else if (node.id.endsWith('-label')) {
+      const topicGroupId = node.id.slice(0, -'-label'.length);
+      setCollapsedTopics((prev) => {
+        const next = new Set(prev);
+        if (next.has(topicGroupId)) {
+          next.delete(topicGroupId);
+        } else {
+          next.add(topicGroupId);
+        }
+        return next;
+      });
     }
   }, []);
 
