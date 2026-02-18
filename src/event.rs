@@ -4,6 +4,19 @@ use uuid::Uuid;
 
 use crate::parsers::{ParsedResponse, ToolCall, Usage};
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentPhase {
+    Thinking,
+    Writing,
+    ToolUse,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentActivity {
+    pub phase: AgentPhase,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObservabilityEvent {
     pub seq: Option<i64>,
@@ -20,6 +33,7 @@ pub struct ObservabilityEvent {
 pub enum Payload {
     UserMessage(UserMessage),
     AssistantResponse(AssistantResponse),
+    AgentActivity(AgentActivity),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

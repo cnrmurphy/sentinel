@@ -170,6 +170,7 @@ async fn show_logs(limit: i64, raw: bool) -> Result<(), Box<dyn std::error::Erro
         let (type_indicator, type_name) = match &event.payload {
             Payload::UserMessage(_) => ("→", "request"),
             Payload::AssistantResponse(_) => ("←", "response"),
+            Payload::AgentActivity(_) => ("~", "activity"),
         };
 
         println!(
@@ -322,6 +323,9 @@ fn print_event_summary(payload: &Payload) {
             if !resp.tool_calls.is_empty() {
                 println!("  Tool calls: {}", resp.tool_calls.len());
             }
+        }
+        Payload::AgentActivity(activity) => {
+            println!("  Phase: {:?}", activity.phase);
         }
     }
 }

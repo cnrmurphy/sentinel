@@ -17,11 +17,13 @@ import '@xyflow/react/dist/style.css';
 const VIRTUALIZATION_BUFFER = 1000;
 
 import { EventNode, type EventNodeData } from './nodes/EventNode';
+import { ActivityNode, type ActivityNodeData } from './nodes/ActivityNode';
 import { EventDetailPanel } from './EventDetailPanel';
 import type { ObservabilityEvent } from '../hooks/useSSE';
 
 const nodeTypes: NodeTypes = {
   event: EventNode,
+  activity: ActivityNode,
 };
 
 const NODE_WIDTH = 320;
@@ -35,9 +37,10 @@ const COLLAPSED_TOPIC_HEIGHT = TOPIC_HEADER_HEIGHT + TOPIC_PADDING;
 interface EventFlowInnerProps {
   events: ObservabilityEvent[];
   followLatest: boolean;
+  agentPhases: Record<string, string>;
 }
 
-function EventFlowInner({ events, followLatest }: EventFlowInnerProps) {
+function EventFlowInner({ events, followLatest, agentPhases }: EventFlowInnerProps) {
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
   const [collapsedTopics, setCollapsedTopics] = useState<Set<string>>(new Set());
   const [viewport, setViewport] = useState<Viewport>({ x: 0, y: 0, zoom: 1 });
@@ -133,36 +136,6 @@ function EventFlowInner({ events, followLatest }: EventFlowInnerProps) {
     const nodes: Node[] = [];
     const edges: Edge[] = [];
 
-    // Find assistant_response with tool_calls that comes after the most recent user_message
-    // in the same session (to filter out internal system noise)
-    let awaitingInputEventId: string | null = null;
-
-    // First, find the most recent user_message and its session
-    let lastUserMessageSession: string | null = null;
-    let lastUserMessageIndex = -1;
-    for (let i = events.length - 1; i >= 0; i--) {
-      if (events[i].payload.type === 'user_message' && events[i].session_id) {
-        lastUserMessageSession = events[i].session_id;
-        lastUserMessageIndex = i;
-        break;
-      }
-    }
-
-    // Now find tool_calls AFTER that user_message in the same session
-    if (lastUserMessageSession && lastUserMessageIndex >= 0) {
-      for (let i = events.length - 1; i > lastUserMessageIndex; i--) {
-        const event = events[i];
-        if (
-          event.session_id === lastUserMessageSession &&
-          event.payload.type === 'assistant_response' &&
-          event.payload.tool_calls.length > 0
-        ) {
-          awaitingInputEventId = event.id;
-          break;
-        }
-      }
-    }
-
     let yOffset = 0;
     let prevNodeId: string | null = null;
     let sessionIndex = 0;
@@ -231,7 +204,7 @@ function EventFlowInner({ events, followLatest }: EventFlowInnerProps) {
           id: nodeId,
           type: 'event',
           position: { x: -NODE_WIDTH / 2, y: yOffset },
-          data: { event, isLatest: event.id === awaitingInputEventId } as EventNodeData,
+          data: { event } as EventNodeData,
           draggable: false,
         });
 
@@ -334,7 +307,7 @@ function EventFlowInner({ events, followLatest }: EventFlowInnerProps) {
               position: { x: TOPIC_PADDING, y: topicYOffset },
               parentId: topicGroupId,
               extent: 'parent',
-              data: { event, isLatest: event.id === awaitingInputEventId } as EventNodeData,
+              data: { event } as EventNodeData,
               draggable: false,
             });
 
@@ -361,8 +334,57 @@ function EventFlowInner({ events, followLatest }: EventFlowInnerProps) {
       prevNodeId = null;
     }
 
+    // Build effective phases: merge backend streaming phases with
+    // inferred tool execution (last event is assistant_response with tool_calls)
+    const effectivePhases: Record<string, string> = { ...agentPhases };
+
+    if (events.length > 0) {
+      const lastEvent = events[events.length - 1];
+      const agent = lastEvent.agent;
+      if (
+        agent &&
+        !effectivePhases[agent] &&
+        lastEvent.payload.type === 'assistant_response' &&
+        lastEvent.payload.tool_calls.length > 0
+      ) {
+        effectivePhases[agent] = 'tool_execution';
+      }
+    }
+
+    for (const [agentName, phase] of Object.entries(effectivePhases)) {
+      let lastAgentNodeId: string | null = null;
+      for (let i = events.length - 1; i >= 0; i--) {
+        if (events[i].agent === agentName) {
+          lastAgentNodeId = events[i].id;
+          break;
+        }
+      }
+
+      const activityNodeId = `activity-${agentName}`;
+      nodes.push({
+        id: activityNodeId,
+        type: 'activity',
+        position: { x: -NODE_WIDTH / 2, y: yOffset },
+        data: { phase } as ActivityNodeData,
+        draggable: false,
+      });
+
+      if (lastAgentNodeId) {
+        edges.push({
+          id: `edge-${lastAgentNodeId}-${activityNodeId}`,
+          source: lastAgentNodeId,
+          target: activityNodeId,
+          type: 'smoothstep',
+          style: { stroke: '#818cf8', strokeWidth: 2, strokeDasharray: '5 5' },
+          animated: true,
+        });
+      }
+
+      yOffset += NODE_HEIGHT + NODE_GAP;
+    }
+
     return { nodes, edges, totalHeight: yOffset };
-  }, [groupedEvents, events, collapsedTopics]);
+  }, [groupedEvents, events, collapsedTopics, agentPhases]);
 
   // Filter nodes and edges to only visible ones (virtualization)
   const { visibleNodes, visibleEdges } = useMemo(() => {
@@ -542,12 +564,13 @@ function EventFlowInner({ events, followLatest }: EventFlowInnerProps) {
 interface EventFlowProps {
   events: ObservabilityEvent[];
   followLatest: boolean;
+  agentPhases: Record<string, string>;
 }
 
-export function EventFlow({ events, followLatest }: EventFlowProps) {
+export function EventFlow({ events, followLatest, agentPhases }: EventFlowProps) {
   return (
     <ReactFlowProvider>
-      <EventFlowInner events={events} followLatest={followLatest} />
+      <EventFlowInner events={events} followLatest={followLatest} agentPhases={agentPhases} />
     </ReactFlowProvider>
   );
 }
