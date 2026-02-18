@@ -31,7 +31,12 @@ export interface AssistantResponse {
   usage: Usage | null;
 }
 
-export type Payload = UserMessage | AssistantResponse;
+export interface AgentActivity {
+  type: 'agent_activity';
+  phase: 'thinking' | 'writing' | 'tool_use';
+}
+
+export type Payload = UserMessage | AssistantResponse | AgentActivity;
 
 export interface ObservabilityEvent {
   seq: number | null;
@@ -65,6 +70,7 @@ export function useSSE(url: string, initialEvents?: ObservabilityEvent[]) {
   });
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [agentPhases, setAgentPhases] = useState<Record<string, string>>({});
 
   const clearEvents = useCallback(() => {
     setEvents([]);
@@ -101,6 +107,22 @@ export function useSSE(url: string, initialEvents?: ObservabilityEvent[]) {
 
         if (envelope.type === 'observability_event') {
           const { event } = envelope.payload as { event: ObservabilityEvent };
+
+          if (event.payload.type === 'agent_activity' && event.agent) {
+            const phase = (event.payload as AgentActivity).phase;
+            setAgentPhases((prev) => ({ ...prev, [event.agent!]: phase }));
+            return;
+          }
+
+          // Clear phase when response arrives
+          if (event.payload.type === 'assistant_response' && event.agent) {
+            setAgentPhases((prev) => {
+              const next = { ...prev };
+              delete next[event.agent!];
+              return next;
+            });
+          }
+
           // Deduplicate: skip if we've already seen this event
           if (seenIds.has(event.id)) {
             return;
@@ -122,5 +144,5 @@ export function useSSE(url: string, initialEvents?: ObservabilityEvent[]) {
     };
   }, [url, seenIds]);
 
-  return { events, connected, error, clearEvents };
+  return { events, connected, error, clearEvents, agentPhases };
 }

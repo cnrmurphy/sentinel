@@ -34,7 +34,7 @@ export function EventList({ agentName }: EventListProps) {
   const sseUrl = agentName
     ? `/api/events?agent=${encodeURIComponent(agentName)}`
     : '/api/events';
-  const { events, connected, error, clearEvents } = useSSE(sseUrl, initialEvents);
+  const { events, connected, error, clearEvents, agentPhases } = useSSE(sseUrl, initialEvents);
 
   return (
     <div
@@ -126,7 +126,7 @@ export function EventList({ agentName }: EventListProps) {
             Waiting for events...
           </div>
         ) : (
-          <EventFlow events={events} followLatest={followLatest} />
+          <EventFlow events={events} followLatest={followLatest} agentPhases={agentPhases} />
         )}
       </div>
     </div>

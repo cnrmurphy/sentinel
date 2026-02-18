@@ -17,11 +17,13 @@ import '@xyflow/react/dist/style.css';
 const VIRTUALIZATION_BUFFER = 1000;
 
 import { EventNode, type EventNodeData } from './nodes/EventNode';
+import { ActivityNode, type ActivityNodeData } from './nodes/ActivityNode';
 import { EventDetailPanel } from './EventDetailPanel';
 import type { ObservabilityEvent } from '../hooks/useSSE';
 
 const nodeTypes: NodeTypes = {
   event: EventNode,
+  activity: ActivityNode,
 };
 
 const NODE_WIDTH = 320;
@@ -35,9 +37,10 @@ const COLLAPSED_TOPIC_HEIGHT = TOPIC_HEADER_HEIGHT + TOPIC_PADDING;
 interface EventFlowInnerProps {
   events: ObservabilityEvent[];
   followLatest: boolean;
+  agentPhases: Record<string, string>;
 }
 
-function EventFlowInner({ events, followLatest }: EventFlowInnerProps) {
+function EventFlowInner({ events, followLatest, agentPhases }: EventFlowInnerProps) {
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
   const [collapsedTopics, setCollapsedTopics] = useState<Set<string>>(new Set());
   const [viewport, setViewport] = useState<Viewport>({ x: 0, y: 0, zoom: 1 });
@@ -361,8 +364,45 @@ function EventFlowInner({ events, followLatest }: EventFlowInnerProps) {
       prevNodeId = null;
     }
 
+    // Add phantom activity nodes for agents with an active phase
+    const activePhases = Object.entries(agentPhases);
+    if (activePhases.length > 0) {
+      for (const [agentName, phase] of activePhases) {
+        // Find the last event node for this agent to connect to
+        let lastAgentNodeId: string | null = null;
+        for (let i = events.length - 1; i >= 0; i--) {
+          if (events[i].agent === agentName) {
+            lastAgentNodeId = events[i].id;
+            break;
+          }
+        }
+
+        const activityNodeId = `activity-${agentName}`;
+        nodes.push({
+          id: activityNodeId,
+          type: 'activity',
+          position: { x: -NODE_WIDTH / 2, y: yOffset },
+          data: { phase } as ActivityNodeData,
+          draggable: false,
+        });
+
+        if (lastAgentNodeId) {
+          edges.push({
+            id: `edge-${lastAgentNodeId}-${activityNodeId}`,
+            source: lastAgentNodeId,
+            target: activityNodeId,
+            type: 'smoothstep',
+            style: { stroke: '#818cf8', strokeWidth: 2, strokeDasharray: '5 5' },
+            animated: true,
+          });
+        }
+
+        yOffset += NODE_HEIGHT + NODE_GAP;
+      }
+    }
+
     return { nodes, edges, totalHeight: yOffset };
-  }, [groupedEvents, events, collapsedTopics]);
+  }, [groupedEvents, events, collapsedTopics, agentPhases]);
 
   // Filter nodes and edges to only visible ones (virtualization)
   const { visibleNodes, visibleEdges } = useMemo(() => {
@@ -542,12 +582,13 @@ function EventFlowInner({ events, followLatest }: EventFlowInnerProps) {
 interface EventFlowProps {
   events: ObservabilityEvent[];
   followLatest: boolean;
+  agentPhases: Record<string, string>;
 }
 
-export function EventFlow({ events, followLatest }: EventFlowProps) {
+export function EventFlow({ events, followLatest, agentPhases }: EventFlowProps) {
   return (
     <ReactFlowProvider>
-      <EventFlowInner events={events} followLatest={followLatest} />
+      <EventFlowInner events={events} followLatest={followLatest} agentPhases={agentPhases} />
     </ReactFlowProvider>
   );
 }
