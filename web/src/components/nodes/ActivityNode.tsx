@@ -9,6 +9,7 @@ const PHASE_LABELS: Record<string, string> = {
   thinking: 'thinking...',
   writing: 'writing...',
   tool_use: 'calling tool...',
+  tool_execution: 'executing tool...',
 };
 
 interface ActivityNodeProps {
