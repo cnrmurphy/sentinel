@@ -5,6 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::event::AgentPhase;
+
 #[derive(Debug, Deserialize)]
 pub struct AnthropicRequest {
     pub model: String,
@@ -168,6 +170,18 @@ pub trait ResponseParser: Send + Sync {
 
     /// Provider name for identification
     fn provider(&self) -> &'static str;
+}
+
+pub fn detect_phase_from_sse_data(data: &str) -> Option<AgentPhase> {
+    let event: SseEvent = serde_json::from_str(data).ok()?;
+    match event {
+        SseEvent::ContentBlockStart { content_block, .. } => match content_block {
+            SseContentBlock::Thinking { .. } => Some(AgentPhase::Thinking),
+            SseContentBlock::Text { .. } => Some(AgentPhase::Writing),
+            SseContentBlock::ToolUse { .. } => Some(AgentPhase::ToolUse),
+        },
+        _ => None,
+    }
 }
 
 /// Anthropic API response parser
@@ -377,6 +391,30 @@ data: {"type":"message_stop"}
         let (is_topic, title) = parse_topic(&None);
         assert!(!is_topic);
         assert_eq!(title, None);
+    }
+
+    #[test]
+    fn test_detect_phase_thinking() {
+        let data = r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#;
+        assert_eq!(detect_phase_from_sse_data(data), Some(AgentPhase::Thinking));
+    }
+
+    #[test]
+    fn test_detect_phase_text() {
+        let data = r#"{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#;
+        assert_eq!(detect_phase_from_sse_data(data), Some(AgentPhase::Writing));
+    }
+
+    #[test]
+    fn test_detect_phase_tool_use() {
+        let data = r#"{"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"tool_1","name":"bash","input":{}}}"#;
+        assert_eq!(detect_phase_from_sse_data(data), Some(AgentPhase::ToolUse));
+    }
+
+    #[test]
+    fn test_detect_phase_non_block_start() {
+        let data = r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}"#;
+        assert_eq!(detect_phase_from_sse_data(data), None);
     }
 
     #[test]

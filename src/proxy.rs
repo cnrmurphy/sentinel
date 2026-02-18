@@ -12,8 +12,8 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::agent::{Agent, AgentStore};
-use crate::event::{ObservabilityEvent, Payload, UserMessage};
-use crate::parsers::{AnthropicRequest, ParsedResponse, ResponseParser};
+use crate::event::{AgentActivity, AgentPhase, ObservabilityEvent, Payload, UserMessage};
+use crate::parsers::{self, AnthropicRequest, ParsedResponse, ResponseParser};
 use crate::storage::Storage;
 
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com";
@@ -173,10 +173,17 @@ async fn handle_streaming_response(
     // Spawn task to collect and forward chunks
     tokio::spawn(async move {
         let mut response_chunks: Vec<Bytes> = Vec::new();
+        let mut phase_tracker = PhaseTracker::new();
 
         while let Some(chunk_result) = stream.next().await {
             match chunk_result {
                 Ok(chunk) => {
+                    if !is_telemetry {
+                        phase_tracker.process_chunk(
+                            &chunk, &event_broadcaster,
+                            &claude_session_id, &agent_name, &agent,
+                        );
+                    }
                     response_chunks.push(chunk.clone());
                     if tx.send(Ok(chunk)).await.is_err() {
                         break;
@@ -333,6 +340,57 @@ async fn store_and_broadcast_response_event(
     }
 
     let _ = event_broadcaster.send(event);
+}
+
+struct PhaseTracker {
+    sse_buffer: String,
+    current_phase: Option<AgentPhase>,
+}
+
+impl PhaseTracker {
+    fn new() -> Self {
+        Self {
+            sse_buffer: String::new(),
+            current_phase: None,
+        }
+    }
+
+    fn process_chunk(
+        &mut self,
+        chunk: &Bytes,
+        event_broadcaster: &tokio::sync::broadcast::Sender<ObservabilityEvent>,
+        session_id: &Option<String>,
+        agent_name: &Option<String>,
+        agent: &Option<Agent>,
+    ) {
+        let Ok(text) = std::str::from_utf8(chunk) else { return };
+        self.sse_buffer.push_str(text);
+
+        while let Some(pos) = self.sse_buffer.find("\n\n") {
+            let event_text = self.sse_buffer[..pos].to_string();
+            self.sse_buffer = self.sse_buffer[pos + 2..].to_string();
+
+            for line in event_text.lines() {
+                if let Some(data) = line.strip_prefix("data: ") {
+                    if let Some(phase) = parsers::detect_phase_from_sse_data(data) {
+                        if self.current_phase.as_ref() != Some(&phase) {
+                            self.current_phase = Some(phase.clone());
+                            let activity_event = ObservabilityEvent {
+                                seq: None,
+                                id: Uuid::new_v4(),
+                                timestamp: chrono::Utc::now(),
+                                session_id: session_id.clone(),
+                                agent: agent_name.clone(),
+                                topic: agent.as_ref().and_then(|a| a.topic.clone()),
+                                payload: Payload::AgentActivity(AgentActivity { phase }),
+                            };
+                            let _ = event_broadcaster.send(activity_event);
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn extract_working_directory(request: &Option<AnthropicRequest>) -> Option<String> {
